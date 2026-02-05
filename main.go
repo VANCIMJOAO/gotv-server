@@ -127,6 +127,7 @@ type GOTVServer struct {
 	authToken      string
 	teamRegistry   *TeamRegistryCache
 	teamIdentifier *TeamIdentifier
+	mapExtractor   *MapExtractor
 }
 
 // NewGOTVServer cria um novo servidor GOTV+
@@ -153,6 +154,7 @@ func NewGOTVServer(port int, authToken string) *GOTVServer {
 		authToken:      authToken,
 		teamRegistry:   teamRegistry,
 		teamIdentifier: teamIdentifier,
+		mapExtractor:   NewMapExtractor(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -386,53 +388,26 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 		}
 
 		match.StartFragment = fragment
-		// Log ALL query parameters for debugging
-		log.Printf("[GOTV] Start fragment - Full URL: %s", r.URL.String())
-		log.Printf("[GOTV] Start fragment - RawQuery: %s", r.URL.RawQuery)
-		for key, values := range r.URL.Query() {
-			log.Printf("[GOTV] Start fragment - Query param: %s = %v", key, values)
-		}
+		log.Printf("[GOTV] Start fragment received - %d bytes", len(data))
 
-		// Analisar dados binários para encontrar nome do mapa
-		// Procurar por padrões comuns de mapas CS2 nos dados
-		dataStr := string(data)
-		mapPatterns := []string{"de_dust2", "de_mirage", "de_inferno", "de_nuke", "de_overpass", "de_vertigo", "de_ancient", "de_anubis", "cs_office", "cs_italy"}
-		for _, pattern := range mapPatterns {
-			if strings.Contains(dataStr, pattern) {
-				match.State.MapName = pattern
-				log.Printf("[GOTV] ✓ Map found in binary data: %s", pattern)
-				break
-			}
-		}
-
-		// Log primeiros 500 bytes em hex para debug
-		hexLen := 500
-		if len(data) < hexLen {
-			hexLen = len(data)
-		}
-		log.Printf("[GOTV] Start fragment first %d bytes (hex): %x", hexLen, data[:hexLen])
-
-		// Procurar strings ASCII legíveis nos dados
-		var printable strings.Builder
-		for i, b := range data {
-			if b >= 32 && b <= 126 {
-				printable.WriteByte(b)
-			} else if printable.Len() > 3 {
-				log.Printf("[GOTV] Readable string at offset %d: %s", i-printable.Len(), printable.String())
-				printable.Reset()
+		// Usar MapExtractor para extrair o nome do mapa do start fragment
+		if s.mapExtractor != nil {
+			mapName, err := s.mapExtractor.ExtractMapFromStartFragment(data)
+			if err == nil && mapName != "" {
+				match.State.MapName = mapName
+				log.Printf("[GOTV] ✓ Map extracted from start fragment: %s", mapName)
 			} else {
-				printable.Reset()
-			}
-			if i > 2000 { // Limitar análise aos primeiros 2KB
-				break
+				log.Printf("[GOTV] ⚠ Could not extract map from start fragment: %v", err)
 			}
 		}
 
-		// Capturar metadados da query string
-		mapName := r.URL.Query().Get("map")
-		if mapName != "" {
-			match.State.MapName = mapName
-			log.Printf("[GOTV] Map name captured from query: %s", mapName)
+		// Fallback: capturar da query string se disponível
+		if match.State.MapName == "" {
+			mapName := r.URL.Query().Get("map")
+			if mapName != "" {
+				match.State.MapName = mapName
+				log.Printf("[GOTV] Map name captured from query: %s", mapName)
+			}
 		}
 		if tps := r.URL.Query().Get("tps"); tps != "" {
 			fmt.Sscanf(tps, "%f", &match.TPS)
