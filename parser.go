@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +15,45 @@ import (
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
 	"github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/msg"
 )
+
+// CSTVSync representa a resposta do endpoint /sync do CSTV
+type CSTVSync struct {
+	Tick           int     `json:"tick"`
+	EndTick        int     `json:"endtick"`
+	MaxTick        int     `json:"maxtick"`
+	RtDelay        float64 `json:"rtdelay"`
+	RcvAge         float64 `json:"rcvage"`
+	Fragment       int     `json:"fragment"`
+	SignupFragment int     `json:"signup_fragment"`
+	Tps            float64 `json:"tps"`
+	KeyframeInterval int   `json:"keyframe_interval"`
+	Map            string  `json:"map"`
+	Protocol       int     `json:"protocol"`
+	TokenRedirect  string  `json:"token_redirect,omitempty"`
+}
+
+// fetchMapFromSync busca o nome do mapa diretamente do endpoint /sync do CSTV
+func fetchMapFromSync(broadcastURL string) (string, error) {
+	syncURL := strings.TrimSuffix(broadcastURL, "/") + "/sync"
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(syncURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch sync: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("sync returned status %d", resp.StatusCode)
+	}
+
+	var syncData CSTVSync
+	if err := json.NewDecoder(resp.Body).Decode(&syncData); err != nil {
+		return "", fmt.Errorf("failed to decode sync: %w", err)
+	}
+
+	return syncData.Map, nil
+}
 
 // GameEvent representa um evento do jogo
 type GameEvent struct {
@@ -62,6 +103,19 @@ func (p *BroadcastParser) SetCallbacks(onUpdate func(*MatchState), onEvent func(
 func (p *BroadcastParser) ParseBroadcast(broadcastURL string) error {
 	p.broadcastURL = broadcastURL
 	log.Printf("[Parser] Connecting to broadcast: %s", broadcastURL)
+
+	// Buscar nome do mapa diretamente do endpoint /sync (mais confiável que esperar eventos)
+	mapName, err := fetchMapFromSync(broadcastURL)
+	if err != nil {
+		log.Printf("[Parser] Warning: Could not fetch map from /sync: %v", err)
+	} else if mapName != "" {
+		p.mu.Lock()
+		p.state.MapName = mapName
+		p.state.Status = "live"
+		p.mu.Unlock()
+		log.Printf("[Parser] ✓ Map from /sync endpoint: %s", mapName)
+		p.emitUpdate()
+	}
 
 	// Criar parser de broadcast CSTV
 	parser, err := dem.NewCSTVBroadcastParser(broadcastURL)
