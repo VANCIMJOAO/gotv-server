@@ -240,8 +240,17 @@ func (me *MapExtractor) isValidMapName(name string) bool {
 		return true
 	}
 
-	// Validação básica: começa com "de_" ou "cs_" e tem caracteres válidos
-	if (strings.HasPrefix(name, "de_") || strings.HasPrefix(name, "cs_")) && len(name) > 3 {
+	// Validação básica: começa com "de_", "cs_", "ar_" ou "dm_" e tem pelo menos 6 caracteres (ex: de_xxx)
+	validPrefixes := []string{"de_", "cs_", "ar_", "dm_"}
+	hasValidPrefix := false
+	for _, prefix := range validPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			hasValidPrefix = true
+			break
+		}
+	}
+
+	if hasValidPrefix && len(name) >= 6 {
 		for _, c := range name {
 			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
 				return false
