@@ -144,6 +144,30 @@ func (p *BroadcastParser) setupEventHandlers() {
 		}
 	})
 
+	// Tentar obter nome do mapa via ConVars
+	parser.RegisterNetMessageHandler(func(e *msg.CNETMsg_SetConVar) {
+		if e.Convars != nil {
+			for _, cvar := range e.Convars.Cvars {
+				name := cvar.GetName()
+				value := cvar.GetValue()
+				// Log convars relacionados a mapa para debug
+				if strings.Contains(strings.ToLower(name), "map") {
+					log.Printf("[Parser] ConVar: %s = %s", name, value)
+				}
+				// Verificar convars conhecidos para nome do mapa
+				if name == "host_map" || name == "mp_mapname" || name == "mapname" {
+					p.mu.Lock()
+					if p.state.MapName == "" && value != "" {
+						p.state.MapName = value
+						log.Printf("[Parser] Map from ConVar %s: %s", name, value)
+					}
+					p.mu.Unlock()
+					p.emitUpdate()
+				}
+			}
+		}
+	})
+
 	// Match começou (sai do warmup)
 	parser.RegisterEventHandler(func(e events.MatchStart) {
 		p.mu.Lock()
