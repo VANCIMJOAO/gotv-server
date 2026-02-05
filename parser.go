@@ -113,9 +113,10 @@ func (p *BroadcastParser) Stop() {
 func (p *BroadcastParser) setupEventHandlers() {
 	parser := p.parser
 
-	// Header do demo (contém nome do mapa)
-	parser.RegisterEventHandler(func(e msg.CDemoFileHeader) {
+	// Header do demo (contém nome do mapa) - usar RegisterNetMessageHandler como no exemplo oficial
+	parser.RegisterNetMessageHandler(func(e *msg.CDemoFileHeader) {
 		mapName := e.GetMapName()
+		log.Printf("[Parser] CDemoFileHeader received - MapName: '%s'", mapName)
 		if mapName != "" {
 			p.mu.Lock()
 			p.state.MapName = mapName
