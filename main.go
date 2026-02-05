@@ -368,6 +368,15 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 		match.Fragments[fragmentNum] = fragment
 	}
 
+	// Tentar extrair mapa se ainda não temos
+	if match.State.MapName == "" && s.mapExtractor != nil {
+		mapName, err := s.mapExtractor.ExtractMapFromStartFragment(data)
+		if err == nil && mapName != "" {
+			match.State.MapName = mapName
+			log.Printf("[GOTV] ✓ Map extracted from %s fragment #%d: %s", fragmentType, fragmentNum, mapName)
+		}
+	}
+
 	if fragmentType == "start" {
 		// Se já tinha um parser rodando, parar e resetar para recomeçar limpo
 		if match.ParserStarted && match.Parser != nil {

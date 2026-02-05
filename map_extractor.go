@@ -22,21 +22,24 @@ type MapExtractor struct {
 func NewMapExtractor() *MapExtractor {
 	return &MapExtractor{
 		knownMaps: map[string]bool{
-			"de_dust2":         true,
-			"de_mirage":        true,
-			"de_inferno":       true,
-			"de_nuke":          true,
-			"de_vertigo":       true,
-			"de_ancient":       true,
-			"de_anubis":        true,
-			"de_overpass":      true,
-			"de_train":         true,
-			"de_cache":         true,
-			"de_cbble":         true,
-			"de_season":        true,
-			"de_tuscan":        true,
-			"cs_office":        true,
-			"cs_italy":         true,
+			// Mapas competitivos CS2
+			"de_dust2":    true,
+			"de_mirage":   true,
+			"de_inferno":  true,
+			"de_nuke":     true,
+			"de_vertigo":  true,
+			"de_ancient":  true,
+			"de_anubis":   true,
+			"de_overpass": true,
+			"de_train":    true,
+			"de_cache":    true,
+			"de_cbble":    true,
+			"de_season":   true,
+			"de_tuscan":   true,
+			// Mapas de refém
+			"cs_office": true,
+			"cs_italy":  true,
+			// Mapas curtos/workshop
 			"de_shortnuke":     true,
 			"de_shortdust":     true,
 			"de_shortinferno":  true,
@@ -45,6 +48,17 @@ func NewMapExtractor() *MapExtractor {
 			"de_shortcache":    true,
 			"de_shorttrains":   true,
 			"de_shortnuke2":    true,
+			// Mapas de armas
+			"ar_shoots":   true,
+			"ar_baggage":  true,
+			"ar_monastery": true,
+			// Mapas deathmatch
+			"dm_workshop": true,
+			// Novos mapas CS2
+			"de_mills":   true,
+			"de_basalt":  true,
+			"de_edin":    true,
+			"de_thera":   true,
 		},
 	}
 }
