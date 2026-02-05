@@ -392,11 +392,47 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 		for key, values := range r.URL.Query() {
 			log.Printf("[GOTV] Start fragment - Query param: %s = %v", key, values)
 		}
+
+		// Analisar dados binários para encontrar nome do mapa
+		// Procurar por padrões comuns de mapas CS2 nos dados
+		dataStr := string(data)
+		mapPatterns := []string{"de_dust2", "de_mirage", "de_inferno", "de_nuke", "de_overpass", "de_vertigo", "de_ancient", "de_anubis", "cs_office", "cs_italy"}
+		for _, pattern := range mapPatterns {
+			if strings.Contains(dataStr, pattern) {
+				match.State.MapName = pattern
+				log.Printf("[GOTV] ✓ Map found in binary data: %s", pattern)
+				break
+			}
+		}
+
+		// Log primeiros 500 bytes em hex para debug
+		hexLen := 500
+		if len(data) < hexLen {
+			hexLen = len(data)
+		}
+		log.Printf("[GOTV] Start fragment first %d bytes (hex): %x", hexLen, data[:hexLen])
+
+		// Procurar strings ASCII legíveis nos dados
+		var printable strings.Builder
+		for i, b := range data {
+			if b >= 32 && b <= 126 {
+				printable.WriteByte(b)
+			} else if printable.Len() > 3 {
+				log.Printf("[GOTV] Readable string at offset %d: %s", i-printable.Len(), printable.String())
+				printable.Reset()
+			} else {
+				printable.Reset()
+			}
+			if i > 2000 { // Limitar análise aos primeiros 2KB
+				break
+			}
+		}
+
 		// Capturar metadados da query string
 		mapName := r.URL.Query().Get("map")
 		if mapName != "" {
 			match.State.MapName = mapName
-			log.Printf("[GOTV] Map name captured: %s", mapName)
+			log.Printf("[GOTV] Map name captured from query: %s", mapName)
 		}
 		if tps := r.URL.Query().Get("tps"); tps != "" {
 			fmt.Sscanf(tps, "%f", &match.TPS)
