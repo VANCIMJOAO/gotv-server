@@ -144,7 +144,7 @@ func (p *BroadcastParser) setupEventHandlers() {
 		}
 	})
 
-	// Tentar obter nome do mapa via ConVars
+	// Tentar obter nome do mapa via ConVars (net message)
 	parser.RegisterNetMessageHandler(func(e *msg.CNETMsg_SetConVar) {
 		if e.Convars != nil {
 			for _, cvar := range e.Convars.Cvars {
@@ -152,20 +152,45 @@ func (p *BroadcastParser) setupEventHandlers() {
 				value := cvar.GetValue()
 				// Log convars relacionados a mapa para debug
 				if strings.Contains(strings.ToLower(name), "map") {
-					log.Printf("[Parser] ConVar: %s = %s", name, value)
+					log.Printf("[Parser] NetMsg ConVar: %s = %s", name, value)
 				}
 				// Verificar convars conhecidos para nome do mapa
 				if name == "host_map" || name == "mp_mapname" || name == "mapname" {
 					p.mu.Lock()
 					if p.state.MapName == "" && value != "" {
 						p.state.MapName = value
-						log.Printf("[Parser] Map from ConVar %s: %s", name, value)
+						log.Printf("[Parser] Map from NetMsg ConVar %s: %s", name, value)
 					}
 					p.mu.Unlock()
 					p.emitUpdate()
 				}
 			}
 		}
+	})
+
+	// ConVarsUpdated event - outra fonte de convars
+	parser.RegisterEventHandler(func(e events.ConVarsUpdated) {
+		for name, value := range e.UpdatedConVars {
+			// Log convars relacionados a mapa para debug
+			if strings.Contains(strings.ToLower(name), "map") {
+				log.Printf("[Parser] Event ConVar: %s = %s", name, value)
+			}
+			// Verificar convars conhecidos para nome do mapa
+			if name == "host_map" || name == "mp_mapname" || name == "mapname" || name == "mapgroup" {
+				p.mu.Lock()
+				if p.state.MapName == "" && value != "" {
+					p.state.MapName = value
+					log.Printf("[Parser] Map from Event ConVar %s: %s", name, value)
+				}
+				p.mu.Unlock()
+				p.emitUpdate()
+			}
+		}
+	})
+
+	// DataTablesParsed - momento ideal para verificar GameState
+	parser.RegisterEventHandler(func(e events.DataTablesParsed) {
+		log.Printf("[Parser] DataTablesParsed event received")
 	})
 
 	// Match começou (sai do warmup)
