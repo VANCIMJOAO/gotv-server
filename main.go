@@ -177,6 +177,7 @@ func (s *GOTVServer) Start() {
 	http.HandleFunc("/api/match/", loggingMiddleware(s.handleGetMatch))
 	http.HandleFunc("/api/events/", loggingMiddleware(s.handleGetEvents))
 	http.HandleFunc("/api/teams/refresh", loggingMiddleware(s.handleRefreshTeams))
+	http.HandleFunc("/api/setmap/", loggingMiddleware(s.handleSetMap))
 	http.HandleFunc("/ws", loggingMiddleware(s.handleWebSocket))
 
 	log.Printf("=================================")
@@ -309,6 +310,16 @@ func (s *GOTVServer) handleSync(w http.ResponseWriter, r *http.Request, matchID 
 
 // handleReceiveFragment recebe um fragmento do CS2
 func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Request, matchID string, fragmentNum int, fragmentType string) {
+	// Log ALL headers and query params for debugging map name
+	log.Printf("[GOTV] Fragment received - Headers:")
+	for key, values := range r.Header {
+		log.Printf("[GOTV]   %s: %v", key, values)
+	}
+	log.Printf("[GOTV] Fragment received - Query params:")
+	for key, values := range r.URL.Query() {
+		log.Printf("[GOTV]   %s: %v", key, values)
+	}
+
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusInternalServerError)
@@ -668,6 +679,64 @@ func (s *GOTVServer) handleRefreshTeams(w http.ResponseWriter, r *http.Request) 
 		"success": true,
 		"message": "Teams refreshed successfully",
 		"count":   len(teams),
+	})
+}
+
+// handleSetMap define o nome do mapa manualmente para uma partida
+// POST /api/setmap/{matchId}?map=de_dust2
+func (s *GOTVServer) handleSetMap(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	matchID := strings.TrimPrefix(r.URL.Path, "/api/setmap/")
+	mapName := r.URL.Query().Get("map")
+
+	if mapName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "map parameter required"})
+		return
+	}
+
+	s.matchesMu.RLock()
+	match, exists := s.matches[matchID]
+	s.matchesMu.RUnlock()
+
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Match not found"})
+		return
+	}
+
+	match.Mu.Lock()
+	match.State.MapName = mapName
+	match.Mu.Unlock()
+
+	log.Printf("[GOTV] ✓ Map manually set for match %s: %s", matchID, mapName)
+
+	// Também atualizar no parser se existir
+	if match.Parser != nil {
+		match.Parser.mu.Lock()
+		match.Parser.state.MapName = mapName
+		match.Parser.mu.Unlock()
+	}
+
+	// Broadcast para clientes
+	s.broadcastToMatch(matchID, WebSocketMessage{
+		Type:      "match_state",
+		MatchID:   matchID,
+		Data:      match.State,
+		Timestamp: time.Now().UnixMilli(),
+	})
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"matchId": matchID,
+		"map":     mapName,
 	})
 }
 
