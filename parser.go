@@ -128,8 +128,10 @@ func (p *BroadcastParser) setupEventHandlers() {
 	})
 
 	// ServerInfo também contém o nome do mapa (fallback para broadcasts)
-	parser.RegisterEventHandler(func(e msg.CSVCMsg_ServerInfo) {
+	// Usar RegisterNetMessageHandler para mensagens de rede
+	parser.RegisterNetMessageHandler(func(e *msg.CSVCMsg_ServerInfo) {
 		mapName := e.GetMapName()
+		log.Printf("[Parser] CSVCMsg_ServerInfo received - MapName: '%s'", mapName)
 		if mapName != "" {
 			p.mu.Lock()
 			// Só atualizar se ainda não temos o nome do mapa
