@@ -115,13 +115,31 @@ func (p *BroadcastParser) setupEventHandlers() {
 
 	// Header do demo (contém nome do mapa)
 	parser.RegisterEventHandler(func(e msg.CDemoFileHeader) {
-		p.mu.Lock()
-		p.state.MapName = e.GetMapName()
-		p.state.Status = "live"
-		p.mu.Unlock()
+		mapName := e.GetMapName()
+		if mapName != "" {
+			p.mu.Lock()
+			p.state.MapName = mapName
+			p.state.Status = "live"
+			p.mu.Unlock()
 
-		log.Printf("[Parser] Map: %s", e.GetMapName())
-		p.emitUpdate()
+			log.Printf("[Parser] Map from header: %s", mapName)
+			p.emitUpdate()
+		}
+	})
+
+	// ServerInfo também contém o nome do mapa (fallback para broadcasts)
+	parser.RegisterEventHandler(func(e msg.CSVCMsg_ServerInfo) {
+		mapName := e.GetMapName()
+		if mapName != "" {
+			p.mu.Lock()
+			// Só atualizar se ainda não temos o nome do mapa
+			if p.state.MapName == "" {
+				p.state.MapName = mapName
+				log.Printf("[Parser] Map from ServerInfo: %s", mapName)
+			}
+			p.mu.Unlock()
+			p.emitUpdate()
+		}
 	})
 
 	// Match começou (sai do warmup)
