@@ -89,11 +89,24 @@ type WebSocketMessage struct {
 	Timestamp int64       `json:"timestamp"`
 }
 
+// WSClient representa um cliente WebSocket com mutex para escrita thread-safe
+type WSClient struct {
+	Conn  *websocket.Conn
+	Mu    sync.Mutex
+}
+
+// WriteMessage escreve uma mensagem de forma thread-safe
+func (c *WSClient) WriteMessage(messageType int, data []byte) error {
+	c.Mu.Lock()
+	defer c.Mu.Unlock()
+	return c.Conn.WriteMessage(messageType, data)
+}
+
 // ActiveMatch representa uma partida ativa
 type ActiveMatch struct {
 	MatchID       string
 	State         *MatchState
-	Clients       map[*websocket.Conn]bool
+	Clients       map[*WSClient]bool
 	Fragments     map[int]*Fragment
 	DeltaFragments map[int]*Fragment
 	StartFragment *Fragment
@@ -315,7 +328,7 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 				Players:      []PlayerState{},
 				UpdatedAt:    time.Now(),
 			},
-			Clients:        make(map[*websocket.Conn]bool),
+			Clients:        make(map[*WSClient]bool),
 			Fragments:      make(map[int]*Fragment),
 			DeltaFragments: make(map[int]*Fragment),
 			TPS:            128,
@@ -681,8 +694,11 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Criar cliente com mutex para escrita thread-safe
+	client := &WSClient{Conn: conn}
+
 	match.ClientsMu.Lock()
-	match.Clients[conn] = true
+	match.Clients[client] = true
 	match.ClientsMu.Unlock()
 
 	log.Printf("[GOTV] → Client connected to match %s", matchID)
@@ -698,7 +714,7 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	match.Mu.RUnlock()
 
 	data, _ := json.Marshal(initialMsg)
-	conn.WriteMessage(websocket.TextMessage, data)
+	client.WriteMessage(websocket.TextMessage, data)
 
 	// Enviar eventos existentes para o novo cliente (para sincronizar game log)
 	if match.Parser != nil {
@@ -711,7 +727,7 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				Timestamp: time.Now().UnixMilli(),
 			}
 			eventData, _ := json.Marshal(eventMsg)
-			conn.WriteMessage(websocket.TextMessage, eventData)
+			client.WriteMessage(websocket.TextMessage, eventData)
 		}
 		log.Printf("[GOTV] Sent %d existing events to new client", len(existingEvents))
 	}
@@ -720,7 +736,7 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() {
 			match.ClientsMu.Lock()
-			delete(match.Clients, conn)
+			delete(match.Clients, client)
 			match.ClientsMu.Unlock()
 			conn.Close()
 			log.Printf("[GOTV] ← Client disconnected from match %s", matchID)
