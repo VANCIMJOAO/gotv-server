@@ -226,10 +226,14 @@ func (s *MatchZyState) AddEvent(event MatchZyEvent) {
 
 // MatchZyHandler gerencia eventos do MatchZy
 type MatchZyHandler struct {
-	states     map[string]*MatchZyState
-	statesMu   sync.RWMutex
-	gotvServer *GOTVServer
-	authToken  string
+	states       map[string]*MatchZyState
+	statesMu     sync.RWMutex
+	gotvServer   *GOTVServer
+	authToken    string
+	gotvMatchMap map[string]string // dbMatchID → gotvMatchID
+	mapMu        sync.RWMutex
+	supabase     *SupabaseClient
+	persister    *StatsPersister
 }
 
 // CleanupExpiredStates remove estados de partidas expiradas
@@ -251,11 +255,14 @@ func (h *MatchZyHandler) CleanupExpiredStates() {
 }
 
 // NewMatchZyHandler cria um novo handler de eventos MatchZy
-func NewMatchZyHandler(gotvServer *GOTVServer, authToken string) *MatchZyHandler {
+func NewMatchZyHandler(gotvServer *GOTVServer, authToken string, supabase *SupabaseClient, persister *StatsPersister) *MatchZyHandler {
 	return &MatchZyHandler{
-		states:     make(map[string]*MatchZyState),
-		gotvServer: gotvServer,
-		authToken:  authToken,
+		states:       make(map[string]*MatchZyState),
+		gotvServer:   gotvServer,
+		authToken:    authToken,
+		gotvMatchMap: make(map[string]string),
+		supabase:     supabase,
+		persister:    persister,
 	}
 }
 
@@ -378,6 +385,83 @@ func (h *MatchZyHandler) handleGoingLive(state *MatchZyState, body []byte) {
 	state.CurrentRound = 1
 	state.CurrentHalf = 1
 	log.Printf("[MatchZy] Match %s is now LIVE! Map: %d", event.MatchID, event.MapNumber)
+
+	// Vincular DB matchID → GOTV matchID
+	// Encontrar a partida GOTV ativa (normalmente só 1 no servidor)
+	h.gotvServer.matchesMu.RLock()
+	for gotvID, match := range h.gotvServer.matches {
+		if match.ParserStarted {
+			h.mapMu.Lock()
+			h.gotvMatchMap[state.MatchID] = gotvID
+			h.mapMu.Unlock()
+			log.Printf("[MatchZy] Linked DB match %s → GOTV match %s", state.MatchID, gotvID)
+			break
+		}
+	}
+	h.gotvServer.matchesMu.RUnlock()
+
+	// Popular times do Supabase
+	if h.supabase != nil {
+		go h.populateTeamsFromDB(state)
+	}
+
+	// Marcar partida como live no Supabase
+	if h.supabase != nil {
+		go func() {
+			if err := h.supabase.UpdateMatchLive(state.MatchID); err != nil {
+				log.Printf("[MatchZy] Failed to update match live in DB: %v", err)
+			}
+		}()
+	}
+}
+
+// populateTeamsFromDB busca os dados dos times no Supabase e popula o state
+func (h *MatchZyHandler) populateTeamsFromDB(state *MatchZyState) {
+	matchDetails, err := h.supabase.FetchMatchDetails(state.MatchID)
+	if err != nil {
+		log.Printf("[MatchZy] Failed to fetch match details from DB: %v", err)
+		return
+	}
+
+	// Popular Team1
+	if matchDetails.Team1 != nil {
+		logoURL := ""
+		if matchDetails.Team1.LogoURL != nil {
+			logoURL = *matchDetails.Team1.LogoURL
+		}
+		team1 := &MatchTeamInfo{
+			ID:          matchDetails.Team1.ID,
+			Name:        matchDetails.Team1.Name,
+			Tag:         matchDetails.Team1.Tag,
+			LogoURL:     logoURL,
+			CurrentSide: "CT", // Default, será corrigido pelo side_picked
+			Score:       0,
+		}
+
+		team2LogoURL := ""
+		if matchDetails.Team2 != nil && matchDetails.Team2.LogoURL != nil {
+			team2LogoURL = *matchDetails.Team2.LogoURL
+		}
+		team2 := &MatchTeamInfo{
+			ID:          matchDetails.Team2.ID,
+			Name:        matchDetails.Team2.Name,
+			Tag:         matchDetails.Team2.Tag,
+			LogoURL:     team2LogoURL,
+			CurrentSide: "T", // Default
+			Score:       0,
+		}
+
+		state.SetTeams(team1, team2)
+		state.BestOf = matchDetails.BestOf
+
+		log.Printf("[MatchZy] Teams populated from DB: %s (%s) vs %s (%s) - BO%d",
+			team1.Name, team1.Tag, team2.Name, team2.Tag, matchDetails.BestOf)
+	} else {
+		log.Printf("[MatchZy] No team data found in DB for match %s", state.MatchID)
+	}
+
+	// Broadcast atualização com dados dos times
+	h.broadcastStateUpdate(state)
 }
 
 // handleKnifeStart processa início do knife round
@@ -490,6 +574,15 @@ func (h *MatchZyHandler) handleRoundEnd(state *MatchZyState, body []byte) {
 
 	log.Printf("[MatchZy] Match %s round %d ended. Score: %d-%d. Winner: %s",
 		state.MatchID, event.RoundNumber, event.Team1Score, event.Team2Score, event.Winner)
+
+	// Atualizar scores no Supabase em tempo real
+	if h.supabase != nil {
+		go func() {
+			if err := h.supabase.UpdateMatchScores(state.MatchID, event.Team1Score, event.Team2Score); err != nil {
+				log.Printf("[MatchZy] Failed to update scores in DB: %v", err)
+			}
+		}()
+	}
 }
 
 // handleMapResult processa fim de mapa
@@ -510,8 +603,13 @@ func (h *MatchZyHandler) handleMapResult(state *MatchZyState, body []byte) {
 	state.mu.Unlock()
 
 	// Se for BO1, a partida terminou
-	if state.BestOf == 1 {
+	if state.BestOf <= 1 {
 		state.UpdatePhase(PhaseFinished)
+
+		// Persistir stats e chamar finish API
+		if h.persister != nil {
+			go h.persistMatchData(state)
+		}
 	}
 
 	log.Printf("[MatchZy] Match %s map %d finished. Winner: %s, Score: %d-%d",
@@ -531,7 +629,66 @@ func (h *MatchZyHandler) handleSeriesResult(state *MatchZyState, body []byte) {
 	log.Printf("[MatchZy] Match %s series finished! Winner: %s, Series score: %d-%d",
 		state.MatchID, event.Winner, event.Team1SeriesScore, event.Team2SeriesScore)
 
-	// TODO: Persistir dados no banco
+	// Persistir stats e chamar finish API
+	if h.persister != nil {
+		go h.persistMatchData(state)
+	}
+}
+
+// persistMatchData persiste stats dos jogadores e chama finish API
+func (h *MatchZyHandler) persistMatchData(state *MatchZyState) {
+	dbMatchID := state.MatchID
+
+	// Encontrar o GOTV match vinculado
+	h.mapMu.RLock()
+	gotvID, linked := h.gotvMatchMap[dbMatchID]
+	h.mapMu.RUnlock()
+
+	if !linked {
+		log.Printf("[MatchZy] No GOTV match linked for DB match %s - trying to find active match", dbMatchID)
+		// Fallback: tentar encontrar qualquer match ativa
+		h.gotvServer.matchesMu.RLock()
+		for id, match := range h.gotvServer.matches {
+			if match.ParserStarted {
+				gotvID = id
+				linked = true
+				break
+			}
+		}
+		h.gotvServer.matchesMu.RUnlock()
+	}
+
+	if !linked {
+		log.Printf("[MatchZy] Cannot persist - no GOTV match found for DB match %s", dbMatchID)
+		// Ainda chamar finish API mesmo sem stats do parser
+		if h.persister != nil {
+			team1Score := 0
+			team2Score := 0
+			if state.Team1 != nil {
+				team1Score = state.Team1.Score
+			}
+			if state.Team2 != nil {
+				team2Score = state.Team2.Score
+			}
+			if err := h.persister.CallFinishAPI(dbMatchID, team1Score, team2Score); err != nil {
+				log.Printf("[MatchZy] Failed to call finish API: %v", err)
+			}
+		}
+		return
+	}
+
+	h.gotvServer.matchesMu.RLock()
+	match := h.gotvServer.matches[gotvID]
+	h.gotvServer.matchesMu.RUnlock()
+
+	if match == nil {
+		log.Printf("[MatchZy] GOTV match %s not found in server matches", gotvID)
+		return
+	}
+
+	if err := h.persister.PersistMatchStats(dbMatchID, match, state); err != nil {
+		log.Printf("[MatchZy] Failed to persist match stats: %v", err)
+	}
 }
 
 // handlePlayerDisconnected processa desconexão de jogador
@@ -545,11 +702,36 @@ func (h *MatchZyHandler) broadcastStateUpdate(state *MatchZyState) {
 		return
 	}
 
-	h.gotvServer.matchesMu.RLock()
-	match, exists := h.gotvServer.matches[state.MatchID]
-	h.gotvServer.matchesMu.RUnlock()
+	// Tentar encontrar o match pelo mapa dbMatchID → gotvMatchID
+	h.mapMu.RLock()
+	gotvID, linked := h.gotvMatchMap[state.MatchID]
+	h.mapMu.RUnlock()
+
+	var match *ActiveMatch
+	var exists bool
+
+	if linked {
+		h.gotvServer.matchesMu.RLock()
+		match, exists = h.gotvServer.matches[gotvID]
+		h.gotvServer.matchesMu.RUnlock()
+	}
 
 	if !exists {
+		// Fallback: tentar pelo matchID direto (caso não tenha sido vinculado ainda)
+		h.gotvServer.matchesMu.RLock()
+		match, exists = h.gotvServer.matches[state.MatchID]
+		if !exists {
+			// Último fallback: broadcast para qualquer match ativa
+			for _, m := range h.gotvServer.matches {
+				match = m
+				exists = true
+				break
+			}
+		}
+		h.gotvServer.matchesMu.RUnlock()
+	}
+
+	if !exists || match == nil {
 		return
 	}
 

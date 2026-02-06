@@ -145,6 +145,7 @@ type GOTVServer struct {
 	upgrader       websocket.Upgrader
 	port           int
 	authToken      string
+	supabaseClient *SupabaseClient
 	teamRegistry   *TeamRegistryCache
 	teamIdentifier *TeamIdentifier
 	mapExtractor   *MapExtractor
@@ -173,6 +174,7 @@ func NewGOTVServer(port int, authToken string) *GOTVServer {
 		matches:        make(map[string]*ActiveMatch),
 		port:           port,
 		authToken:      authToken,
+		supabaseClient: supabaseClient,
 		teamRegistry:   teamRegistry,
 		teamIdentifier: teamIdentifier,
 		mapExtractor:   NewMapExtractor(),
@@ -212,7 +214,20 @@ func (s *GOTVServer) Start() {
 	if matchzyAuthToken == "" {
 		matchzyAuthToken = "orbital_secret_token"
 	}
-	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken)
+
+	// Configurar persistência de stats
+	finishAPIURL := os.Getenv("FINISH_API_URL")
+	if finishAPIURL == "" {
+		finishAPIURL = "https://orbital-store.vercel.app"
+	}
+
+	var persister *StatsPersister
+	if s.supabaseClient != nil {
+		persister = NewStatsPersister(s.supabaseClient, s.teamRegistry, finishAPIURL)
+		log.Printf("[GOTV] Stats persister configured - Finish API: %s", finishAPIURL)
+	}
+
+	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken, s.supabaseClient, persister)
 	s.matchzyHandler.RegisterRoutes()
 
 	log.Printf("=================================")

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,12 +33,32 @@ type TeamFromDB struct {
 // PlayerFromDB representa um jogador do banco de dados
 type PlayerFromDB struct {
 	ID        string  `json:"id"`
+	ProfileID *string `json:"profile_id"`
 	Nickname  string  `json:"nickname"`
 	Name      *string `json:"name"`
 	SteamID   *string `json:"steam_id"`
 	TeamID    *string `json:"team_id"`
 	CreatedAt string  `json:"created_at"`
 	UpdatedAt *string `json:"updated_at"`
+}
+
+// MatchFromDB representa uma partida do banco de dados com teams
+type MatchFromDB struct {
+	ID           string      `json:"id"`
+	TournamentID string      `json:"tournament_id"`
+	Team1ID      string      `json:"team1_id"`
+	Team2ID      string      `json:"team2_id"`
+	Team1Score   int         `json:"team1_score"`
+	Team2Score   int         `json:"team2_score"`
+	WinnerID     *string     `json:"winner_id"`
+	Status       string      `json:"status"`
+	Round        *string     `json:"round"`
+	BestOf       int         `json:"best_of"`
+	MapName      *string     `json:"map_name"`
+	IsLive       *bool       `json:"is_live"`
+	MatchPhase   *string     `json:"match_phase"`
+	Team1        *TeamFromDB `json:"team1,omitempty"`
+	Team2        *TeamFromDB `json:"team2,omitempty"`
 }
 
 // NewSupabaseClient cria um novo cliente Supabase
@@ -255,4 +276,193 @@ func (r *TeamRegistryCache) GetAllTeams() []*TeamFromDB {
 		teams = append(teams, team)
 	}
 	return teams
+}
+
+// GetProfileIDBySteamID retorna o profile_id de um jogador pelo SteamID
+func (r *TeamRegistryCache) GetProfileIDBySteamID(steamID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	teamID, exists := r.playerTeams[steamID]
+	if !exists {
+		return ""
+	}
+
+	team := r.teams[teamID]
+	if team == nil {
+		return ""
+	}
+
+	for _, player := range team.Players {
+		if player.SteamID != nil && *player.SteamID == steamID && player.ProfileID != nil {
+			return *player.ProfileID
+		}
+	}
+	return ""
+}
+
+// FetchMatchDetails busca uma partida com seus times do Supabase
+func (c *SupabaseClient) FetchMatchDetails(matchID string) (*MatchFromDB, error) {
+	if c == nil {
+		return nil, fmt.Errorf("supabase client not initialized")
+	}
+
+	// Buscar partida com teams via embedding
+	url := fmt.Sprintf("%s/rest/v1/matches?id=eq.%s&select=*,team1:teams!matches_team1_id_fkey(id,name,tag,logo_url),team2:teams!matches_team2_id_fkey(id,name,tag,logo_url)", c.baseURL, matchID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch match: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var matches []MatchFromDB
+	if err := json.NewDecoder(resp.Body).Decode(&matches); err != nil {
+		return nil, fmt.Errorf("failed to decode match: %w", err)
+	}
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("match not found: %s", matchID)
+	}
+
+	return &matches[0], nil
+}
+
+// UpdateMatchLive marca uma partida como ao vivo no Supabase
+func (c *SupabaseClient) UpdateMatchLive(matchID string) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/matches?id=eq.%s", c.baseURL, matchID)
+
+	payload := map[string]interface{}{
+		"status":      "live",
+		"match_phase": "live",
+		"is_live":     true,
+		"started_at":  time.Now().UTC().Format(time.RFC3339),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("PATCH", url, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update match live: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	log.Printf("[Supabase] Match %s marked as LIVE", matchID)
+	return nil
+}
+
+// UpdateMatchScores atualiza os scores de uma partida em tempo real
+func (c *SupabaseClient) UpdateMatchScores(matchID string, team1Score, team2Score int) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/matches?id=eq.%s", c.baseURL, matchID)
+
+	payload := map[string]interface{}{
+		"team1_score": team1Score,
+		"team2_score": team2Score,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("PATCH", url, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update match scores: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// InsertMatchPlayerStats insere stats de jogadores no banco
+func (c *SupabaseClient) InsertMatchPlayerStats(stats []map[string]interface{}) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/match_player_stats", c.baseURL)
+
+	body, err := json.Marshal(stats)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to insert player stats: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	log.Printf("[Supabase] Inserted %d player stats records", len(stats))
+	return nil
 }
