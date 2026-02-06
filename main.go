@@ -333,12 +333,18 @@ func (s *GOTVServer) handleSync(w http.ResponseWriter, r *http.Request, matchID 
 		}
 	}
 
+	// Determinar o signup_fragment (start) real
+	signupFragment := 0
+	if match.StartFragment != nil {
+		signupFragment = match.StartFragment.Number
+	}
+
 	response := map[string]interface{}{
 		"tick":             match.State.LastTick,
 		"rtdelay":          0.0,
 		"rcvage":           0.0,
 		"fragment":         fragment,
-		"signup_fragment":  0,
+		"signup_fragment":  signupFragment,
 		"tps":              int(match.TPS),
 		"keyframe_interval": 3.0,
 		"protocol":         match.Protocol,
@@ -468,7 +474,15 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 	match.State.LastTick = fragmentNum * 128 // Aproximação
 	match.State.UpdatedAt = time.Now()
 
-	// Iniciar parser quando temos start + alguns fragmentos
+	// Se não temos start fragment, usar o primeiro full fragment como fallback.
+	// O CS2 só envia o start fragment uma vez quando o broadcast começa.
+	// Se o GOTV server reiniciar, o start não é reenviado.
+	if match.StartFragment == nil && fragmentType == "full" && len(match.Fragments) == 1 {
+		match.StartFragment = fragment
+		log.Printf("[GOTV] ⚠ No start fragment available - using first full fragment #%d as fallback start", fragmentNum)
+	}
+
+	// Iniciar parser quando temos start (ou fallback) + alguns fragmentos
 	shouldStartParser := !match.ParserStarted && match.StartFragment != nil && len(match.Fragments) >= 3
 	match.Mu.Unlock()
 
