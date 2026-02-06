@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -45,10 +46,29 @@ const (
 	EventKnifeRoundWon      MatchZyEventType = "knife_won"
 )
 
+// FlexibleString aceita tanto string quanto número no JSON unmarshal
+type FlexibleString string
+
+func (f *FlexibleString) UnmarshalJSON(data []byte) error {
+	// Tentar como string primeiro
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*f = FlexibleString(s)
+		return nil
+	}
+	// Tentar como número
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = FlexibleString(n.String())
+		return nil
+	}
+	return fmt.Errorf("matchid must be string or number, got: %s", string(data))
+}
+
 // MatchZyEvent evento genérico do MatchZy
 type MatchZyEvent struct {
 	Event     MatchZyEventType       `json:"event"`
-	MatchID   string                 `json:"matchid"`
+	MatchID   FlexibleString         `json:"matchid"`
 	MapNumber int                    `json:"map_number,omitempty"`
 	Timestamp string                 `json:"timestamp,omitempty"`
 	Data      map[string]interface{} `json:"data,omitempty"`
@@ -57,14 +77,14 @@ type MatchZyEvent struct {
 // MatchZyGoingLive evento quando a partida começa
 type MatchZyGoingLive struct {
 	Event     MatchZyEventType `json:"event"`
-	MatchID   string           `json:"matchid"`
+	MatchID   FlexibleString   `json:"matchid"`
 	MapNumber int              `json:"map_number"`
 }
 
 // MatchZyRoundEnd evento de fim de round
 type MatchZyRoundEnd struct {
 	Event       MatchZyEventType `json:"event"`
-	MatchID     string           `json:"matchid"`
+	MatchID     FlexibleString   `json:"matchid"`
 	MapNumber   int              `json:"map_number"`
 	RoundNumber int              `json:"round_number"`
 	RoundTime   int              `json:"round_time"`
@@ -77,7 +97,7 @@ type MatchZyRoundEnd struct {
 // MatchZyMapResult evento de fim de mapa
 type MatchZyMapResult struct {
 	Event      MatchZyEventType `json:"event"`
-	MatchID    string           `json:"matchid"`
+	MatchID    FlexibleString   `json:"matchid"`
 	MapNumber  int              `json:"map_number"`
 	Winner     string           `json:"winner"` // "team1", "team2" ou "none"
 	Team1Score int              `json:"team1_score"`
@@ -87,7 +107,7 @@ type MatchZyMapResult struct {
 // MatchZySeriesResult evento de fim de série
 type MatchZySeriesResult struct {
 	Event            MatchZyEventType `json:"event"`
-	MatchID          string           `json:"matchid"`
+	MatchID          FlexibleString   `json:"matchid"`
 	Winner           string           `json:"winner"`
 	Team1SeriesScore int              `json:"team1_series_score"`
 	Team2SeriesScore int              `json:"team2_series_score"`
@@ -97,7 +117,7 @@ type MatchZySeriesResult struct {
 // MatchZySidePicked evento de escolha de lado
 type MatchZySidePicked struct {
 	Event     MatchZyEventType `json:"event"`
-	MatchID   string           `json:"matchid"`
+	MatchID   FlexibleString   `json:"matchid"`
 	MapNumber int              `json:"map_number"`
 	Team      string           `json:"team"` // "team1" ou "team2"
 	Side      string           `json:"side"` // "CT" ou "T"
@@ -106,7 +126,7 @@ type MatchZySidePicked struct {
 // MatchZyKnifeWon evento de vitória no knife
 type MatchZyKnifeWon struct {
 	Event     MatchZyEventType `json:"event"`
-	MatchID   string           `json:"matchid"`
+	MatchID   FlexibleString   `json:"matchid"`
 	MapNumber int              `json:"map_number"`
 	Winner    string           `json:"winner"` // "team1" ou "team2"
 }
@@ -368,9 +388,10 @@ func (h *MatchZyHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolver matchID numérico → UUID real do banco
-	resolvedMatchID := h.resolveMatchID(genericEvent.MatchID)
-	if resolvedMatchID != genericEvent.MatchID {
-		log.Printf("[MatchZy] Resolved matchID: %s → %s", genericEvent.MatchID, resolvedMatchID)
+	rawMatchID := string(genericEvent.MatchID)
+	resolvedMatchID := h.resolveMatchID(rawMatchID)
+	if resolvedMatchID != rawMatchID {
+		log.Printf("[MatchZy] Resolved matchID: %s → %s", rawMatchID, resolvedMatchID)
 	}
 
 	// Obter ou criar estado da partida (usando UUID real)
