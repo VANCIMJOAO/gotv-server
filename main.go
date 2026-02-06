@@ -474,22 +474,31 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 	match.State.LastTick = fragmentNum * 128 // Aproximação
 	match.State.UpdatedAt = time.Now()
 
-	// Se não temos start fragment, usar o primeiro full fragment como fallback.
 	// O CS2 só envia o start fragment uma vez quando o broadcast começa.
-	// Se o GOTV server reiniciar, o start não é reenviado.
+	// Se o GOTV server reiniciar, o start NÃO é reenviado.
+	// Sem o start fragment, o demoinfocs parser não consegue inicializar as tabelas de entidades.
+	// Nesse caso, NÃO iniciamos o parser - ele precisa do start real.
+	// Log quando estamos recebendo fragments sem start (para diagnóstico)
 	if match.StartFragment == nil && fragmentType == "full" && len(match.Fragments) == 1 {
-		match.StartFragment = fragment
-		log.Printf("[GOTV] ⚠ No start fragment available - using first full fragment #%d as fallback start", fragmentNum)
+		log.Printf("[GOTV] ⚠ Receiving fragments but no start fragment yet - parser will start when CS2 sends start (requires match restart or tv_broadcast 1)")
 	}
 
-	// Iniciar parser quando temos start (ou fallback) + alguns fragmentos
-	shouldStartParser := !match.ParserStarted && match.StartFragment != nil && len(match.Fragments) >= 3
+	// Iniciar parser APENAS quando temos o start fragment real + alguns full fragments
+	shouldStartParser := !match.ParserStarted && match.StartFragment != nil && match.StartFragment.Type == "start" && len(match.Fragments) >= 3
 	match.Mu.Unlock()
 
 	// Log apenas a cada 10 fragmentos para reduzir spam
 	if fragmentNum%10 == 0 {
-		log.Printf("[GOTV] ← Fragment #%d (%s) - %d bytes - Match: %s - Frags: %d+%d delta",
-			fragmentNum, fragmentType, len(data), matchID, len(match.Fragments), len(match.DeltaFragments))
+		hasStart := "no-start"
+		if match.StartFragment != nil && match.StartFragment.Type == "start" {
+			hasStart = "has-start"
+		}
+		parserStatus := "off"
+		if match.ParserStarted {
+			parserStatus = "running"
+		}
+		log.Printf("[GOTV] ← Fragment #%d (%s) - %d bytes - Match: %s - Frags: %d+%d delta [%s|parser:%s]",
+			fragmentNum, fragmentType, len(data), matchID, len(match.Fragments), len(match.DeltaFragments), hasStart, parserStatus)
 	}
 
 	// Iniciar o parser de broadcast

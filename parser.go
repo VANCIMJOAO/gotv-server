@@ -140,11 +140,6 @@ func (p *BroadcastParser) ParseBroadcast(broadcastURL string) error {
 		err := parser.ParseToEnd()
 		if err != nil {
 			log.Printf("[Parser] Broadcast parse ended: %v", err)
-			// Se o erro for de entidade, tentar reconectar
-			if strings.Contains(err.Error(), "entity") {
-				log.Printf("[Parser] Entity error detected - broadcast may have started mid-game")
-				log.Printf("[Parser] Tip: Restart the match with 'mp_restartgame 1' for clean parsing")
-			}
 		} else {
 			log.Printf("[Parser] Broadcast parse completed")
 		}
