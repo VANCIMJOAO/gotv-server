@@ -466,3 +466,49 @@ func (c *SupabaseClient) InsertMatchPlayerStats(stats []map[string]interface{}) 
 	log.Printf("[Supabase] Inserted %d player stats records", len(stats))
 	return nil
 }
+
+// ResolveMatchUUID resolve um matchID numérico (do MatchZy) para o UUID real do banco
+// Busca a partida que tem matchzy_config->matchid igual ao valor numérico
+func (c *SupabaseClient) ResolveMatchUUID(numericMatchID string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("supabase client not initialized")
+	}
+
+	// Buscar partida pelo matchzy_config que contém o matchid numérico
+	// Supabase JSON filter: matchzy_config->matchid = numericMatchID
+	url := fmt.Sprintf("%s/rest/v1/matches?matchzy_config->>matchid=eq.%s&select=id&limit=1", c.baseURL, numericMatchID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve match UUID: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var matches []struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&matches); err != nil {
+		return "", fmt.Errorf("failed to decode: %w", err)
+	}
+
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no match found with matchzy_id %s", numericMatchID)
+	}
+
+	log.Printf("[Supabase] Resolved numeric matchID %s → UUID %s", numericMatchID, matches[0].ID)
+	return matches[0].ID, nil
+}

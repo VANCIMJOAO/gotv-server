@@ -234,6 +234,8 @@ type MatchZyHandler struct {
 	mapMu        sync.RWMutex
 	supabase     *SupabaseClient
 	persister    *StatsPersister
+	uuidCache    map[string]string // numericMatchID → UUID cache
+	uuidMu       sync.RWMutex
 }
 
 // CleanupExpiredStates remove estados de partidas expiradas
@@ -263,7 +265,41 @@ func NewMatchZyHandler(gotvServer *GOTVServer, authToken string, supabase *Supab
 		gotvMatchMap: make(map[string]string),
 		supabase:     supabase,
 		persister:    persister,
+		uuidCache:    make(map[string]string),
 	}
+}
+
+// resolveMatchID resolve um matchID numérico (do MatchZy) para UUID real do banco
+// Se o matchID já é um UUID (contém "-"), retorna ele mesmo
+func (h *MatchZyHandler) resolveMatchID(matchID string) string {
+	// Se já é UUID, retornar direto
+	if strings.Contains(matchID, "-") {
+		return matchID
+	}
+
+	// Checar cache
+	h.uuidMu.RLock()
+	if uuid, ok := h.uuidCache[matchID]; ok {
+		h.uuidMu.RUnlock()
+		return uuid
+	}
+	h.uuidMu.RUnlock()
+
+	// Buscar no Supabase
+	if h.supabase != nil {
+		uuid, err := h.supabase.ResolveMatchUUID(matchID)
+		if err != nil {
+			log.Printf("[MatchZy] Failed to resolve matchID %s to UUID: %v", matchID, err)
+			return matchID // fallback: retorna o original
+		}
+		// Salvar no cache
+		h.uuidMu.Lock()
+		h.uuidCache[matchID] = uuid
+		h.uuidMu.Unlock()
+		return uuid
+	}
+
+	return matchID
 }
 
 // GetOrCreateState obtém ou cria um estado de partida
@@ -331,8 +367,14 @@ func (h *MatchZyHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Obter ou criar estado da partida
-	state := h.GetOrCreateState(genericEvent.MatchID)
+	// Resolver matchID numérico → UUID real do banco
+	resolvedMatchID := h.resolveMatchID(genericEvent.MatchID)
+	if resolvedMatchID != genericEvent.MatchID {
+		log.Printf("[MatchZy] Resolved matchID: %s → %s", genericEvent.MatchID, resolvedMatchID)
+	}
+
+	// Obter ou criar estado da partida (usando UUID real)
+	state := h.GetOrCreateState(resolvedMatchID)
 
 	// Processar evento baseado no tipo
 	switch genericEvent.Event {
@@ -782,7 +824,15 @@ func (h *MatchZyHandler) handleGetState(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Tentar com UUID direto, senão resolver numérico
 	state := h.GetState(matchID)
+	if state == nil {
+		// Tentar resolver como numérico
+		resolved := h.resolveMatchID(matchID)
+		if resolved != matchID {
+			state = h.GetState(resolved)
+		}
+	}
 	if state == nil {
 		http.Error(w, "Match not found", http.StatusNotFound)
 		return
