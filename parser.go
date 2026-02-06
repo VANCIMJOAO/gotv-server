@@ -363,12 +363,6 @@ func (p *BroadcastParser) setupEventHandlers() {
 		// Para bots (SteamID64 == 0): comparar por nome como fallback
 		p.mu.Lock()
 
-		// Debug: mostrar info do killer
-		if e.Killer != nil {
-			log.Printf("[Parser] Kill event - Killer: %s (SteamID64: %d)", e.Killer.Name, e.Killer.SteamID64)
-		}
-
-		foundKiller := false
 		for i := range p.state.Players {
 			// Verificar killer
 			if e.Killer != nil {
@@ -377,13 +371,10 @@ func (p *BroadcastParser) setupEventHandlers() {
 				isKiller := (e.Killer.SteamID64 != 0 && p.state.Players[i].SteamID == killerSteamID) ||
 					(e.Killer.SteamID64 == 0 && p.state.Players[i].Name == e.Killer.Name)
 				if isKiller {
-					foundKiller = true
 					p.state.Players[i].RoundKills++
 					if e.IsHeadshot {
 						p.state.Players[i].Headshots++
 					}
-					log.Printf("[Parser] Stats updated for %s: RoundKills=%d, Headshots=%d",
-						p.state.Players[i].Name, p.state.Players[i].RoundKills, p.state.Players[i].Headshots)
 				}
 			}
 			// Verificar victim
@@ -395,14 +386,6 @@ func (p *BroadcastParser) setupEventHandlers() {
 				if isVictim {
 					p.state.Players[i].IsAlive = false
 				}
-			}
-		}
-
-		if e.Killer != nil && !foundKiller {
-			log.Printf("[Parser] WARNING: Killer %s (SteamID64: %d) not found in players list!", e.Killer.Name, e.Killer.SteamID64)
-			log.Printf("[Parser] Current players:")
-			for _, player := range p.state.Players {
-				log.Printf("[Parser]   - %s (SteamID: %s)", player.Name, player.SteamID)
 			}
 		}
 
@@ -447,7 +430,6 @@ func (p *BroadcastParser) setupEventHandlers() {
 		}
 
 		attackerSteamID := fmt.Sprintf("%d", e.Attacker.SteamID64)
-		foundAttacker := false
 
 		p.mu.Lock()
 		for i := range p.state.Players {
@@ -455,17 +437,11 @@ func (p *BroadcastParser) setupEventHandlers() {
 			isAttacker := (e.Attacker.SteamID64 != 0 && p.state.Players[i].SteamID == attackerSteamID) ||
 				(e.Attacker.SteamID64 == 0 && p.state.Players[i].Name == e.Attacker.Name)
 			if isAttacker {
-				foundAttacker = true
 				p.state.Players[i].Damage += e.HealthDamage
 				p.state.Players[i].RoundDamage += e.HealthDamage
 			}
 		}
 		p.mu.Unlock()
-
-		if !foundAttacker && e.HealthDamage > 0 {
-			log.Printf("[Parser] WARNING: Damage attacker %s (SteamID64: %d) not found! Damage: %d",
-				e.Attacker.Name, e.Attacker.SteamID64, e.HealthDamage)
-		}
 	})
 
 	// Bomba plantada
@@ -711,10 +687,16 @@ func (p *BroadcastParser) emitUpdate() {
 	}
 }
 
-// emitEvent notifica sobre novo evento
+// emitEvent notifica sobre novo evento com cap de MaxEvents
 func (p *BroadcastParser) emitEvent(event GameEvent) {
 	p.mu.Lock()
 	p.events = append(p.events, event)
+	// Manter apenas os últimos MaxEvents eventos
+	if len(p.events) > MaxEvents {
+		// Descartar os primeiros eventos (manter os mais recentes)
+		copy(p.events, p.events[len(p.events)-MaxEvents:])
+		p.events = p.events[:MaxEvents]
+	}
 	p.mu.Unlock()
 
 	if p.onEvent != nil {

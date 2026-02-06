@@ -7,12 +7,32 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+const (
+	// MaxFragments é o número máximo de fragmentos mantidos em memória por tipo
+	MaxFragments = 30
+	// MaxEvents é o número máximo de eventos mantidos em memória por partida
+	MaxEvents = 500
+	// MaxMatchZyEvents é o número máximo de eventos MatchZy mantidos
+	MaxMatchZyEvents = 200
+	// MatchExpirationTime é o tempo para expirar uma partida sem atividade
+	MatchExpirationTime = 30 * time.Minute
+	// WSReadTimeout é o timeout de leitura do WebSocket
+	WSReadTimeout = 5 * time.Minute
+	// WSWriteTimeout é o timeout de escrita do WebSocket
+	WSWriteTimeout = 10 * time.Second
+	// CleanupInterval é o intervalo entre limpezas de partidas expiradas
+	CleanupInterval = 5 * time.Minute
+	// MemoryLogInterval é o intervalo entre logs de memória
+	MemoryLogInterval = 2 * time.Minute
 )
 
 // MatchState representa o estado atual da partida
@@ -128,6 +148,7 @@ type GOTVServer struct {
 	teamRegistry   *TeamRegistryCache
 	teamIdentifier *TeamIdentifier
 	mapExtractor   *MapExtractor
+	matchzyHandler *MatchZyHandler
 }
 
 // NewGOTVServer cria um novo servidor GOTV+
@@ -173,6 +194,10 @@ func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 // Start inicia o servidor
 func (s *GOTVServer) Start() {
+	// Iniciar goroutines de manutenção
+	go s.cleanupExpiredMatches()
+	go s.logMemoryStats()
+
 	// Rotas HTTP com logging
 	http.HandleFunc("/gotv/", loggingMiddleware(s.handleGOTV))
 	http.HandleFunc("/api/matches", loggingMiddleware(s.handleListMatches))
@@ -181,6 +206,14 @@ func (s *GOTVServer) Start() {
 	http.HandleFunc("/api/teams/refresh", loggingMiddleware(s.handleRefreshTeams))
 	http.HandleFunc("/api/setmap/", loggingMiddleware(s.handleSetMap))
 	http.HandleFunc("/ws", loggingMiddleware(s.handleWebSocket))
+
+	// Inicializar e registrar handler do MatchZy
+	matchzyAuthToken := os.Getenv("MATCHZY_AUTH_TOKEN")
+	if matchzyAuthToken == "" {
+		matchzyAuthToken = "orbital_secret_token"
+	}
+	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken)
+	s.matchzyHandler.RegisterRoutes()
 
 	log.Printf("=================================")
 	log.Printf("   ArenaCS GOTV+ Server (Go)")
@@ -200,6 +233,12 @@ func (s *GOTVServer) Start() {
 	log.Printf("  tv_broadcast_url \"http://YOUR_IP:%d/gotv\"", s.port)
 	log.Printf("  tv_broadcast_origin_auth \"%s\"", s.authToken)
 	log.Printf("  tv_broadcast 1")
+	log.Printf("")
+	log.Printf("MatchZy Configuration:")
+	log.Printf("----------------------")
+	log.Printf("  matchzy_remote_log_url \"http://YOUR_IP:%d/api/matchzy/events\"", s.port)
+	log.Printf("  matchzy_remote_log_header_key \"Authorization\"")
+	log.Printf("  matchzy_remote_log_header_value \"Bearer %s\"", matchzyAuthToken)
 	log.Printf("")
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", s.port), nil))
@@ -312,16 +351,6 @@ func (s *GOTVServer) handleSync(w http.ResponseWriter, r *http.Request, matchID 
 
 // handleReceiveFragment recebe um fragmento do CS2
 func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Request, matchID string, fragmentNum int, fragmentType string) {
-	// Log ALL headers and query params for debugging map name
-	log.Printf("[GOTV] Fragment received - Headers:")
-	for key, values := range r.Header {
-		log.Printf("[GOTV]   %s: %v", key, values)
-	}
-	log.Printf("[GOTV] Fragment received - Query params:")
-	for key, values := range r.URL.Query() {
-		log.Printf("[GOTV]   %s: %v", key, values)
-	}
-
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusInternalServerError)
@@ -361,11 +390,18 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 
 	match.Mu.Lock()
 
-	// Armazenar fragmento no mapa correto
+	// Armazenar fragmento no mapa correto e limpar antigos
 	if fragmentType == "delta" {
 		match.DeltaFragments[fragmentNum] = fragment
+		// Rotação: manter apenas os últimos MaxFragments
+		if len(match.DeltaFragments) > MaxFragments {
+			pruneFragmentMap(match.DeltaFragments, MaxFragments)
+		}
 	} else {
 		match.Fragments[fragmentNum] = fragment
+		if len(match.Fragments) > MaxFragments {
+			pruneFragmentMap(match.Fragments, MaxFragments)
+		}
 	}
 
 	// Tentar extrair mapa se ainda não temos
@@ -436,7 +472,11 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 	shouldStartParser := !match.ParserStarted && match.StartFragment != nil && len(match.Fragments) >= 3
 	match.Mu.Unlock()
 
-	log.Printf("[GOTV] ← Fragment #%d (%s) - %d bytes - Match: %s - Query: %s", fragmentNum, fragmentType, len(data), matchID, r.URL.RawQuery)
+	// Log apenas a cada 10 fragmentos para reduzir spam
+	if fragmentNum%10 == 0 {
+		log.Printf("[GOTV] ← Fragment #%d (%s) - %d bytes - Match: %s - Frags: %d+%d delta",
+			fragmentNum, fragmentType, len(data), matchID, len(match.Fragments), len(match.DeltaFragments))
+	}
 
 	// Iniciar o parser de broadcast
 	if shouldStartParser {
@@ -485,7 +525,6 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 			},
 			func(event GameEvent) {
 				// Broadcast evento para clientes
-				log.Printf("[GOTV] 📤 Broadcasting event: %s to match %s", event.Type, matchID)
 				s.broadcastToMatch(matchID, WebSocketMessage{
 					Type:      "event",
 					MatchID:   matchID,
@@ -574,18 +613,29 @@ func (s *GOTVServer) broadcastToMatch(matchID string, msg WebSocketMessage) {
 	}
 
 	match.ClientsMu.RLock()
-	defer match.ClientsMu.RUnlock()
-
-	clientCount := len(match.Clients)
-	if msg.Type == "event" && clientCount > 0 {
-		log.Printf("[GOTV] 📨 Sending event to %d clients", clientCount)
-	}
-
+	clients := make([]*WSClient, 0, len(match.Clients))
 	for client := range match.Clients {
+		clients = append(clients, client)
+	}
+	match.ClientsMu.RUnlock()
+
+	var deadClients []*WSClient
+	for _, client := range clients {
+		client.Conn.SetWriteDeadline(time.Now().Add(WSWriteTimeout))
 		err := client.WriteMessage(websocket.TextMessage, data)
 		if err != nil {
-			log.Printf("[GOTV] Error sending to client: %v", err)
+			deadClients = append(deadClients, client)
 		}
+	}
+
+	// Remover clientes mortos
+	if len(deadClients) > 0 {
+		match.ClientsMu.Lock()
+		for _, client := range deadClients {
+			delete(match.Clients, client)
+			client.Conn.Close()
+		}
+		match.ClientsMu.Unlock()
 	}
 }
 
@@ -786,11 +836,18 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Criar cliente com mutex para escrita thread-safe
 	client := &WSClient{Conn: conn}
 
+	// Configurar timeouts no WebSocket
+	conn.SetReadDeadline(time.Now().Add(WSReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(WSReadTimeout))
+		return nil
+	})
+
 	match.ClientsMu.Lock()
 	match.Clients[client] = true
 	match.ClientsMu.Unlock()
 
-	log.Printf("[GOTV] → Client connected to match %s", matchID)
+	log.Printf("[GOTV] → Client connected to match %s (total: %d)", matchID, len(match.Clients))
 
 	// Enviar estado inicial
 	match.Mu.RLock()
@@ -803,6 +860,7 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	match.Mu.RUnlock()
 
 	data, _ := json.Marshal(initialMsg)
+	conn.SetWriteDeadline(time.Now().Add(WSWriteTimeout))
 	client.WriteMessage(websocket.TextMessage, data)
 
 	// Enviar eventos existentes para o novo cliente (para sincronizar game log)
@@ -816,6 +874,7 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				Timestamp: time.Now().UnixMilli(),
 			}
 			eventData, _ := json.Marshal(eventMsg)
+			conn.SetWriteDeadline(time.Now().Add(WSWriteTimeout))
 			client.WriteMessage(websocket.TextMessage, eventData)
 		}
 		log.Printf("[GOTV] Sent %d existing events to new client", len(existingEvents))
@@ -836,6 +895,8 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				break
 			}
+			// Reset read deadline on any message
+			conn.SetReadDeadline(time.Now().Add(WSReadTimeout))
 
 			var msg map[string]interface{}
 			if err := json.Unmarshal(message, &msg); err != nil {
@@ -847,10 +908,118 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					"type":      "pong",
 					"timestamp": time.Now().UnixMilli(),
 				})
+				conn.SetWriteDeadline(time.Now().Add(WSWriteTimeout))
 				conn.WriteMessage(websocket.TextMessage, pong)
 			}
 		}
 	}()
+}
+
+// pruneFragmentMap remove os fragmentos mais antigos mantendo apenas os últimos maxKeep
+func pruneFragmentMap(fragments map[int]*Fragment, maxKeep int) {
+	if len(fragments) <= maxKeep {
+		return
+	}
+
+	// Encontrar o fragmento mais recente
+	maxNum := 0
+	for num := range fragments {
+		if num > maxNum {
+			maxNum = num
+		}
+	}
+
+	// Remover fragmentos antigos (manter apenas os que estão dentro do range)
+	minKeep := maxNum - maxKeep
+	for num := range fragments {
+		if num < minKeep {
+			delete(fragments, num)
+		}
+	}
+}
+
+// cleanupExpiredMatches remove partidas sem atividade
+func (s *GOTVServer) cleanupExpiredMatches() {
+	ticker := time.NewTicker(CleanupInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.matchesMu.Lock()
+		now := time.Now()
+		var toDelete []string
+
+		for id, match := range s.matches {
+			match.Mu.RLock()
+			lastUpdate := match.State.UpdatedAt
+			match.Mu.RUnlock()
+
+			if now.Sub(lastUpdate) > MatchExpirationTime {
+				// Parar parser se estiver rodando
+				if match.Parser != nil {
+					match.Parser.Stop()
+				}
+				// Fechar todos os clientes WebSocket
+				match.ClientsMu.Lock()
+				for client := range match.Clients {
+					client.Conn.Close()
+				}
+				match.ClientsMu.Unlock()
+
+				toDelete = append(toDelete, id)
+			}
+		}
+
+		for _, id := range toDelete {
+			delete(s.matches, id)
+			log.Printf("[GOTV] 🧹 Expired match removed: %s", id)
+		}
+		s.matchesMu.Unlock()
+
+		if len(toDelete) > 0 {
+			runtime.GC()
+			log.Printf("[GOTV] 🧹 Cleanup: removed %d expired matches", len(toDelete))
+		}
+
+		// Limpar estados MatchZy expirados também
+		if s.matchzyHandler != nil {
+			s.matchzyHandler.CleanupExpiredStates()
+		}
+	}
+}
+
+// logMemoryStats loga estatísticas de memória periodicamente
+func (s *GOTVServer) logMemoryStats() {
+	ticker := time.NewTicker(MemoryLogInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+
+		s.matchesMu.RLock()
+		matchCount := len(s.matches)
+		totalFrags := 0
+		totalClients := 0
+		for _, match := range s.matches {
+			match.Mu.RLock()
+			totalFrags += len(match.Fragments) + len(match.DeltaFragments)
+			match.Mu.RUnlock()
+			match.ClientsMu.RLock()
+			totalClients += len(match.Clients)
+			match.ClientsMu.RUnlock()
+		}
+		s.matchesMu.RUnlock()
+
+		log.Printf("[MEM] Alloc: %dMB | Sys: %dMB | GC: %d | Goroutines: %d | Matches: %d | Fragments: %d | Clients: %d",
+			m.Alloc/1024/1024,
+			m.Sys/1024/1024,
+			m.NumGC,
+			runtime.NumGoroutine(),
+			matchCount,
+			totalFrags,
+			totalClients,
+		)
+	}
 }
 
 func main() {
