@@ -860,6 +860,35 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	match, exists := s.matches[matchID]
 	s.matchesMu.RUnlock()
 
+	// Se não encontrou diretamente, tentar resolver UUID → gotvID via MatchZy mapping
+	if !exists && s.matchzyHandler != nil {
+		s.matchzyHandler.mapMu.RLock()
+		gotvID, linked := s.matchzyHandler.gotvMatchMap[matchID]
+		s.matchzyHandler.mapMu.RUnlock()
+
+		if linked {
+			s.matchesMu.RLock()
+			match, exists = s.matches[gotvID]
+			s.matchesMu.RUnlock()
+			if exists {
+				log.Printf("[GOTV] WebSocket: resolved UUID %s → GOTV %s", matchID, gotvID)
+			}
+		}
+
+		// Último fallback: se só tem 1 match ativa, usar ela
+		if !exists {
+			s.matchesMu.RLock()
+			if len(s.matches) == 1 {
+				for _, m := range s.matches {
+					match = m
+					exists = true
+					log.Printf("[GOTV] WebSocket: single active match fallback for UUID %s", matchID)
+				}
+			}
+			s.matchesMu.RUnlock()
+		}
+	}
+
 	if !exists {
 		http.Error(w, "Match not found", http.StatusNotFound)
 		return
