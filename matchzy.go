@@ -246,16 +246,30 @@ func (s *MatchZyState) AddEvent(event MatchZyEvent) {
 
 // MatchZyHandler gerencia eventos do MatchZy
 type MatchZyHandler struct {
-	states       map[string]*MatchZyState
-	statesMu     sync.RWMutex
-	gotvServer   *GOTVServer
-	authToken    string
-	gotvMatchMap map[string]string // dbMatchID → gotvMatchID
-	mapMu        sync.RWMutex
-	supabase     *SupabaseClient
-	persister    *StatsPersister
-	uuidCache    map[string]string // numericMatchID → UUID cache
-	uuidMu       sync.RWMutex
+	states         map[string]*MatchZyState
+	statesMu       sync.RWMutex
+	gotvServer     *GOTVServer
+	authToken      string
+	gotvMatchMap   map[string]string // dbMatchID → gotvMatchID
+	mapMu          sync.RWMutex
+	supabase       *SupabaseClient
+	persister      *StatsPersister
+	eventPersister *EventPersister
+	uuidCache      map[string]string // numericMatchID → UUID cache
+	uuidMu         sync.RWMutex
+	// Tracking de round para persistência
+	roundTrackers  map[string]*RoundTracker // dbMatchID → tracker
+	roundMu        sync.RWMutex
+}
+
+// RoundTracker rastreia dados de um round em andamento para persistência
+type RoundTracker struct {
+	FirstKillSteamID  string
+	FirstDeathSteamID string
+	BombPlantedBy     string
+	BombDefusedBy     string
+	BombPlantSite     string
+	HasFirstKill      bool
 }
 
 // CleanupExpiredStates remove estados de partidas expiradas
@@ -277,15 +291,17 @@ func (h *MatchZyHandler) CleanupExpiredStates() {
 }
 
 // NewMatchZyHandler cria um novo handler de eventos MatchZy
-func NewMatchZyHandler(gotvServer *GOTVServer, authToken string, supabase *SupabaseClient, persister *StatsPersister) *MatchZyHandler {
+func NewMatchZyHandler(gotvServer *GOTVServer, authToken string, supabase *SupabaseClient, persister *StatsPersister, eventPersister *EventPersister) *MatchZyHandler {
 	return &MatchZyHandler{
-		states:       make(map[string]*MatchZyState),
-		gotvServer:   gotvServer,
-		authToken:    authToken,
-		gotvMatchMap: make(map[string]string),
-		supabase:     supabase,
-		persister:    persister,
-		uuidCache:    make(map[string]string),
+		states:         make(map[string]*MatchZyState),
+		gotvServer:     gotvServer,
+		authToken:      authToken,
+		gotvMatchMap:   make(map[string]string),
+		supabase:       supabase,
+		persister:      persister,
+		eventPersister: eventPersister,
+		uuidCache:      make(map[string]string),
+		roundTrackers:  make(map[string]*RoundTracker),
 	}
 }
 
@@ -595,6 +611,11 @@ func (h *MatchZyHandler) handleRoundStart(state *MatchZyState, body []byte) {
 	state.mu.Lock()
 	state.CurrentRound++
 	state.mu.Unlock()
+
+	// Resetar tracker para o novo round
+	h.roundMu.Lock()
+	h.roundTrackers[state.MatchID] = &RoundTracker{}
+	h.roundMu.Unlock()
 }
 
 // handleRoundEnd processa fim de round
@@ -645,6 +666,120 @@ func (h *MatchZyHandler) handleRoundEnd(state *MatchZyState, body []byte) {
 				log.Printf("[MatchZy] Failed to update scores in DB: %v", err)
 			}
 		}()
+	}
+
+	// Persistir dados do round no banco
+	if h.eventPersister != nil && h.gotvServer != nil && h.gotvServer.teamRegistry != nil {
+		go func() {
+			teamRegistry := h.gotvServer.teamRegistry
+			teamRegistry.RefreshIfNeeded()
+
+			// Determinar winner_team_id e lados CT/T
+			var winnerTeamID, ctTeamID, tTeamID string
+			state.mu.RLock()
+			if state.Team1 != nil && state.Team2 != nil {
+				// Determinar quem é CT e quem é T
+				if state.Team1.CurrentSide == "CT" {
+					ctTeamID = state.Team1.ID
+					tTeamID = state.Team2.ID
+				} else {
+					ctTeamID = state.Team2.ID
+					tTeamID = state.Team1.ID
+				}
+
+				// Determinar winner
+				if event.Winner == "team1" {
+					winnerTeamID = state.Team1.ID
+				} else if event.Winner == "team2" {
+					winnerTeamID = state.Team2.ID
+				}
+			}
+			state.mu.RUnlock()
+
+			// Mapear reason do MatchZy para string legível
+			winReason := matchzyRoundReason(event.Reason)
+
+			// Pegar dados do tracker
+			h.roundMu.Lock()
+			tracker := h.roundTrackers[state.MatchID]
+			roundData := RoundPersistData{
+				RoundNumber:     event.RoundNumber,
+				WinnerTeamID:    winnerTeamID,
+				WinReason:       winReason,
+				CTTeamID:        ctTeamID,
+				TTeamID:         tTeamID,
+				DurationSeconds: event.RoundTime,
+			}
+
+			// Ajustar scores baseado nos lados
+			// MatchZy envia team1_score e team2_score, não CT/T scores
+			// Precisamos mapear baseado no lado atual
+			state.mu.RLock()
+			if state.Team1 != nil && state.Team1.CurrentSide == "CT" {
+				roundData.CTScore = event.Team1Score
+				roundData.TScore = event.Team2Score
+			} else {
+				roundData.CTScore = event.Team2Score
+				roundData.TScore = event.Team1Score
+			}
+			state.mu.RUnlock()
+
+			if tracker != nil {
+				// Resolver SteamIDs para profile_ids
+				if tracker.FirstKillSteamID != "" {
+					profileID := teamRegistry.GetProfileIDBySteamID(tracker.FirstKillSteamID)
+					if profileID != "" {
+						roundData.FirstKillProfileID = profileID
+					}
+				}
+				if tracker.FirstDeathSteamID != "" {
+					profileID := teamRegistry.GetProfileIDBySteamID(tracker.FirstDeathSteamID)
+					if profileID != "" {
+						roundData.FirstDeathProfileID = profileID
+					}
+				}
+				if tracker.BombPlantedBy != "" {
+					profileID := teamRegistry.GetProfileIDBySteamID(tracker.BombPlantedBy)
+					if profileID != "" {
+						roundData.BombPlantedBy = profileID
+					}
+				}
+				if tracker.BombDefusedBy != "" {
+					profileID := teamRegistry.GetProfileIDBySteamID(tracker.BombDefusedBy)
+					if profileID != "" {
+						roundData.BombDefusedBy = profileID
+					}
+				}
+				roundData.BombPlantSite = tracker.BombPlantSite
+			}
+
+			// Resetar tracker para o próximo round
+			h.roundTrackers[state.MatchID] = &RoundTracker{}
+			h.roundMu.Unlock()
+
+			h.eventPersister.PersistRound(state.MatchID, roundData)
+		}()
+	}
+}
+
+// matchzyRoundReason mapeia o código de razão do MatchZy para string legível
+// Baseado nos valores do CSRoundEndReason do CS2
+func matchzyRoundReason(reason int) string {
+	switch reason {
+	case 1:
+		return "target_bombed"
+	case 7:
+		return "bomb_defused"
+	case 8:
+		return "ct_elimination"
+	case 9:
+		return "t_elimination"
+	case 12:
+		return "time_expired"
+	case 17:
+		return "hostages_rescued"
+	default:
+		return fmt.Sprintf("reason_%d", reason)
 	}
 }
 
@@ -751,6 +886,96 @@ func (h *MatchZyHandler) persistMatchData(state *MatchZyState) {
 
 	if err := h.persister.PersistMatchStats(dbMatchID, match, state); err != nil {
 		log.Printf("[MatchZy] Failed to persist match stats: %v", err)
+	}
+}
+
+// HandleParserEvent recebe eventos do parser GOTV e persiste no banco
+// É chamado pelo callback onEvent do parser (definido em main.go)
+func (h *MatchZyHandler) HandleParserEvent(gotvMatchID string, event GameEvent) {
+	if h.eventPersister == nil {
+		return
+	}
+
+	// Encontrar o dbMatchID a partir do gotvMatchID
+	dbMatchID := ""
+	h.mapMu.RLock()
+	for dbID, gID := range h.gotvMatchMap {
+		if gID == gotvMatchID {
+			dbMatchID = dbID
+			break
+		}
+	}
+	h.mapMu.RUnlock()
+
+	if dbMatchID == "" {
+		return // Sem match vinculado, não persistir
+	}
+
+	switch event.Type {
+	case "kill":
+		go h.eventPersister.PersistKillEvent(dbMatchID, event)
+
+		// Rastrear first kill/death do round
+		h.roundMu.Lock()
+		tracker, exists := h.roundTrackers[dbMatchID]
+		if !exists {
+			tracker = &RoundTracker{}
+			h.roundTrackers[dbMatchID] = tracker
+		}
+		if !tracker.HasFirstKill {
+			tracker.HasFirstKill = true
+			if attacker, ok := event.Data["attacker"].(map[string]interface{}); ok {
+				if steamID, ok := attacker["steamId"].(string); ok {
+					tracker.FirstKillSteamID = steamID
+				}
+			}
+			if victim, ok := event.Data["victim"].(map[string]interface{}); ok {
+				if steamID, ok := victim["steamId"].(string); ok {
+					tracker.FirstDeathSteamID = steamID
+				}
+			}
+		}
+		h.roundMu.Unlock()
+
+	case "bomb_planted":
+		go h.eventPersister.PersistBombEvent(dbMatchID, event)
+
+		// Rastrear bomb planted para o round
+		h.roundMu.Lock()
+		tracker, exists := h.roundTrackers[dbMatchID]
+		if !exists {
+			tracker = &RoundTracker{}
+			h.roundTrackers[dbMatchID] = tracker
+		}
+		if planter, ok := event.Data["planter"].(map[string]interface{}); ok {
+			if steamID, ok := planter["steamId"].(string); ok {
+				tracker.BombPlantedBy = steamID
+			}
+		}
+		if site, ok := event.Data["site"].(string); ok {
+			tracker.BombPlantSite = site
+		}
+		h.roundMu.Unlock()
+
+	case "bomb_defused":
+		go h.eventPersister.PersistBombEvent(dbMatchID, event)
+
+		// Rastrear bomb defused para o round
+		h.roundMu.Lock()
+		tracker, exists := h.roundTrackers[dbMatchID]
+		if !exists {
+			tracker = &RoundTracker{}
+			h.roundTrackers[dbMatchID] = tracker
+		}
+		if defuser, ok := event.Data["defuser"].(map[string]interface{}); ok {
+			if steamID, ok := defuser["steamId"].(string); ok {
+				tracker.BombDefusedBy = steamID
+			}
+		}
+		h.roundMu.Unlock()
+
+	case "bomb_exploded":
+		go h.eventPersister.PersistBombEvent(dbMatchID, event)
 	}
 }
 

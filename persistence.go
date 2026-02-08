@@ -177,6 +177,228 @@ func (sp *StatsPersister) CallFinishAPI(dbMatchID string, team1Score, team2Score
 	return nil
 }
 
+// EventPersister persiste eventos e rounds em tempo real no Supabase
+type EventPersister struct {
+	supabase     *SupabaseClient
+	teamRegistry *TeamRegistryCache
+}
+
+// NewEventPersister cria um novo persistidor de eventos
+func NewEventPersister(supabase *SupabaseClient, teamRegistry *TeamRegistryCache) *EventPersister {
+	return &EventPersister{
+		supabase:     supabase,
+		teamRegistry: teamRegistry,
+	}
+}
+
+// PersistKillEvent persiste um evento de kill no banco
+func (ep *EventPersister) PersistKillEvent(dbMatchID string, event GameEvent) {
+	if ep.supabase == nil {
+		return
+	}
+
+	data := event.Data
+	if data == nil {
+		return
+	}
+
+	// Extrair SteamIDs do attacker e victim
+	var attackerProfileID, victimProfileID *string
+	var weapon *string
+	isHeadshot := false
+
+	if attacker, ok := data["attacker"].(map[string]interface{}); ok {
+		if steamID, ok := attacker["steamId"].(string); ok && steamID != "" && steamID != "0" {
+			profileID := ep.teamRegistry.GetProfileIDBySteamID(steamID)
+			if profileID != "" {
+				attackerProfileID = &profileID
+			}
+		}
+	}
+
+	if victim, ok := data["victim"].(map[string]interface{}); ok {
+		if steamID, ok := victim["steamId"].(string); ok && steamID != "" && steamID != "0" {
+			profileID := ep.teamRegistry.GetProfileIDBySteamID(steamID)
+			if profileID != "" {
+				victimProfileID = &profileID
+			}
+		}
+	}
+
+	if w, ok := data["weapon"].(string); ok {
+		weapon = &w
+	}
+
+	if hs, ok := data["headshot"].(bool); ok {
+		isHeadshot = hs
+	}
+
+	// Construir event_data com informações extras
+	eventData := map[string]interface{}{
+		"wallbang":     data["wallbang"],
+		"throughSmoke": data["throughSmoke"],
+		"noScope":      data["noScope"],
+		"flash":        data["flash"],
+	}
+	// Incluir assister se existir
+	if assister, ok := data["assister"].(map[string]interface{}); ok {
+		if steamID, ok := assister["steamId"].(string); ok && steamID != "" && steamID != "0" {
+			assisterProfileID := ep.teamRegistry.GetProfileIDBySteamID(steamID)
+			if assisterProfileID != "" {
+				eventData["assister_profile_id"] = assisterProfileID
+			}
+		}
+	}
+
+	eventDataJSON, _ := json.Marshal(eventData)
+
+	record := map[string]interface{}{
+		"match_id":     dbMatchID,
+		"event_type":   "kill",
+		"round_number": event.Round,
+		"tick":         event.Tick,
+		"event_data":   string(eventDataJSON),
+		"is_headshot":  isHeadshot,
+	}
+
+	if attackerProfileID != nil {
+		record["attacker_profile_id"] = *attackerProfileID
+	}
+	if victimProfileID != nil {
+		record["victim_profile_id"] = *victimProfileID
+	}
+	if weapon != nil {
+		record["weapon"] = *weapon
+	}
+
+	if err := ep.supabase.InsertMatchEvent(record); err != nil {
+		log.Printf("[EventPersist] Failed to persist kill event: %v", err)
+	}
+}
+
+// PersistBombEvent persiste um evento de bomba (planted/defused/exploded) no banco
+func (ep *EventPersister) PersistBombEvent(dbMatchID string, event GameEvent) {
+	if ep.supabase == nil {
+		return
+	}
+
+	data := event.Data
+	if data == nil {
+		return
+	}
+
+	var attackerProfileID *string
+
+	// Para bomb_planted: o "planter" é o attacker
+	if planter, ok := data["planter"].(map[string]interface{}); ok {
+		if steamID, ok := planter["steamId"].(string); ok && steamID != "" && steamID != "0" {
+			profileID := ep.teamRegistry.GetProfileIDBySteamID(steamID)
+			if profileID != "" {
+				attackerProfileID = &profileID
+			}
+		}
+	}
+
+	// Para bomb_defused: o "defuser" é o attacker
+	if defuser, ok := data["defuser"].(map[string]interface{}); ok {
+		if steamID, ok := defuser["steamId"].(string); ok && steamID != "" && steamID != "0" {
+			profileID := ep.teamRegistry.GetProfileIDBySteamID(steamID)
+			if profileID != "" {
+				attackerProfileID = &profileID
+			}
+		}
+	}
+
+	eventData := map[string]interface{}{}
+	if site, ok := data["site"].(string); ok {
+		eventData["site"] = site
+	}
+
+	eventDataJSON, _ := json.Marshal(eventData)
+
+	record := map[string]interface{}{
+		"match_id":     dbMatchID,
+		"event_type":   event.Type,
+		"round_number": event.Round,
+		"tick":         event.Tick,
+		"event_data":   string(eventDataJSON),
+	}
+
+	if attackerProfileID != nil {
+		record["attacker_profile_id"] = *attackerProfileID
+	}
+
+	if err := ep.supabase.InsertMatchEvent(record); err != nil {
+		log.Printf("[EventPersist] Failed to persist %s event: %v", event.Type, err)
+	}
+}
+
+// PersistRound persiste um registro de round no banco
+func (ep *EventPersister) PersistRound(dbMatchID string, roundData RoundPersistData) {
+	if ep.supabase == nil {
+		return
+	}
+
+	record := map[string]interface{}{
+		"match_id":     dbMatchID,
+		"round_number": roundData.RoundNumber,
+		"win_reason":   roundData.WinReason,
+		"ct_score":     roundData.CTScore,
+		"t_score":      roundData.TScore,
+	}
+
+	if roundData.WinnerTeamID != "" {
+		record["winner_team_id"] = roundData.WinnerTeamID
+	}
+	if roundData.CTTeamID != "" {
+		record["ct_team_id"] = roundData.CTTeamID
+	}
+	if roundData.TTeamID != "" {
+		record["t_team_id"] = roundData.TTeamID
+	}
+	if roundData.DurationSeconds > 0 {
+		record["duration_seconds"] = roundData.DurationSeconds
+	}
+	if roundData.FirstKillProfileID != "" {
+		record["first_kill_profile_id"] = roundData.FirstKillProfileID
+	}
+	if roundData.FirstDeathProfileID != "" {
+		record["first_death_profile_id"] = roundData.FirstDeathProfileID
+	}
+	if roundData.BombPlantedBy != "" {
+		record["bomb_planted_by"] = roundData.BombPlantedBy
+	}
+	if roundData.BombDefusedBy != "" {
+		record["bomb_defused_by"] = roundData.BombDefusedBy
+	}
+	if roundData.BombPlantSite != "" {
+		record["bomb_plant_site"] = roundData.BombPlantSite
+	}
+
+	if err := ep.supabase.InsertMatchRound(record); err != nil {
+		log.Printf("[EventPersist] Failed to persist round %d: %v", roundData.RoundNumber, err)
+	} else {
+		log.Printf("[EventPersist] Round %d persisted for match %s", roundData.RoundNumber, dbMatchID)
+	}
+}
+
+// RoundPersistData dados para persistir um round
+type RoundPersistData struct {
+	RoundNumber       int
+	WinnerTeamID      string
+	WinReason         string
+	CTTeamID          string
+	TTeamID           string
+	CTScore           int
+	TScore            int
+	DurationSeconds   int
+	FirstKillProfileID string
+	FirstDeathProfileID string
+	BombPlantedBy     string
+	BombDefusedBy     string
+	BombPlantSite     string
+}
+
 // updateGOTVMatchID salva o GOTV match ID no banco para referência
 func (sp *StatsPersister) updateGOTVMatchID(dbMatchID, gotvMatchID string) {
 	if sp.supabase == nil {

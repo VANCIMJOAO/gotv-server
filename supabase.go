@@ -467,6 +467,81 @@ func (c *SupabaseClient) InsertMatchPlayerStats(stats []map[string]interface{}) 
 	return nil
 }
 
+// InsertMatchEvent insere um evento de partida (kill, bomb_planted, etc) no banco
+func (c *SupabaseClient) InsertMatchEvent(event map[string]interface{}) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/match_events", c.baseURL)
+
+	body, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to insert match event: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// InsertMatchRound insere um registro de round no banco (upsert por match_id + round_number)
+func (c *SupabaseClient) InsertMatchRound(round map[string]interface{}) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/match_rounds", c.baseURL)
+
+	body, err := json.Marshal(round)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	// Upsert: se já existir round com mesmo match_id+round_number, atualizar
+	req.Header.Set("Prefer", "resolution=merge-duplicates,return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to insert match round: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
 // ResolveMatchUUID resolve um matchID numérico (do MatchZy) para o UUID real do banco
 // Busca a partida que tem matchzy_config->matchid igual ao valor numérico
 func (c *SupabaseClient) ResolveMatchUUID(numericMatchID string) (string, error) {

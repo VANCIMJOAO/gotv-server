@@ -222,12 +222,15 @@ func (s *GOTVServer) Start() {
 	}
 
 	var persister *StatsPersister
+	var eventPersister *EventPersister
 	if s.supabaseClient != nil {
 		persister = NewStatsPersister(s.supabaseClient, s.teamRegistry, finishAPIURL)
+		eventPersister = NewEventPersister(s.supabaseClient, s.teamRegistry)
 		log.Printf("[GOTV] Stats persister configured - Finish API: %s", finishAPIURL)
+		log.Printf("[GOTV] Event persister configured - match_events & match_rounds will be saved")
 	}
 
-	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken, s.supabaseClient, persister)
+	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken, s.supabaseClient, persister, eventPersister)
 	s.matchzyHandler.RegisterRoutes()
 
 	log.Printf("=================================")
@@ -569,6 +572,11 @@ func (s *GOTVServer) handleReceiveFragment(w http.ResponseWriter, r *http.Reques
 					Data:      event,
 					Timestamp: time.Now().UnixMilli(),
 				})
+
+				// Persistir evento no banco via MatchZyHandler
+				if s.matchzyHandler != nil {
+					s.matchzyHandler.HandleParserEvent(matchID, event)
+				}
 			},
 		)
 
