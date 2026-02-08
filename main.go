@@ -690,11 +690,21 @@ func (s *GOTVServer) handleListMatches(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	// Construir mapa inverso gotvMatchID → dbMatchID
+	reverseMap := make(map[string]string)
+	if s.matchzyHandler != nil {
+		s.matchzyHandler.mapMu.RLock()
+		for dbID, gotvID := range s.matchzyHandler.gotvMatchMap {
+			reverseMap[gotvID] = dbID
+		}
+		s.matchzyHandler.mapMu.RUnlock()
+	}
+
 	s.matchesMu.RLock()
 	var matches []map[string]interface{}
 	for id, match := range s.matches {
 		match.Mu.RLock()
-		matches = append(matches, map[string]interface{}{
+		entry := map[string]interface{}{
 			"matchId":       id,
 			"status":        match.State.Status,
 			"mapName":       match.State.MapName,
@@ -705,7 +715,11 @@ func (s *GOTVServer) handleListMatches(w http.ResponseWriter, r *http.Request) {
 			"totalBytes":    match.State.TotalBytes,
 			"clients":       len(match.Clients),
 			"updatedAt":     match.State.UpdatedAt,
-		})
+		}
+		if dbID, ok := reverseMap[id]; ok {
+			entry["dbMatchId"] = dbID
+		}
+		matches = append(matches, entry)
 		match.Mu.RUnlock()
 	}
 	s.matchesMu.RUnlock()
