@@ -1,0 +1,14 @@
+# Binary
+gotv-server.exe
+gotv-server
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
