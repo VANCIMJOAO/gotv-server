@@ -796,17 +796,40 @@ func (s *GOTVServer) handleDebugResolve(w http.ResponseWriter, r *http.Request) 
 
 	matchID := strings.TrimPrefix(r.URL.Path, "/api/debug/resolve/")
 	result := map[string]interface{}{
-		"input":          matchID,
-		"supabaseClient": s.matchzyHandler != nil && s.matchzyHandler.supabase != nil,
+		"input": matchID,
 	}
 
-	if s.matchzyHandler != nil {
-		resolved := s.matchzyHandler.resolveMatchID(matchID)
-		result["resolved"] = resolved
-		result["changed"] = resolved != matchID
-	} else {
+	if s.matchzyHandler == nil {
 		result["error"] = "no matchzy handler"
+		json.NewEncoder(w).Encode(result)
+		return
 	}
+
+	sb := s.matchzyHandler.supabase
+	result["supabaseClient"] = sb != nil
+
+	if sb == nil {
+		result["error"] = "supabase client is nil"
+		json.NewEncoder(w).Encode(result)
+		return
+	}
+
+	result["supabaseURL"] = sb.baseURL
+
+	// Testar cada fallback separadamente
+	uuid1, err1 := sb.queryMatchByConfig(matchID)
+	result["fallback1_config"] = map[string]interface{}{"result": uuid1, "error": fmt.Sprintf("%v", err1)}
+
+	uuid2, err2 := sb.queryMatchByStatus("live")
+	result["fallback2_live"] = map[string]interface{}{"result": uuid2, "error": fmt.Sprintf("%v", err2)}
+
+	uuid3, err3 := sb.queryMatchByStatusWithConfig("scheduled")
+	result["fallback3_scheduled"] = map[string]interface{}{"result": uuid3, "error": fmt.Sprintf("%v", err3)}
+
+	// Resultado final
+	resolved := s.matchzyHandler.resolveMatchID(matchID)
+	result["resolved"] = resolved
+	result["changed"] = resolved != matchID
 
 	json.NewEncoder(w).Encode(result)
 }
