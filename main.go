@@ -897,15 +897,24 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Último fallback: se só tem 1 match ativa, usar ela
+		// Último fallback: usar a match mais recente (pelo UpdatedAt)
 		if !exists {
 			s.matchesMu.RLock()
-			if len(s.matches) == 1 {
-				for _, m := range s.matches {
-					match = m
-					exists = true
-					log.Printf("[GOTV] WebSocket: single active match fallback for UUID %s", matchID)
+			var newest *ActiveMatch
+			var newestTime time.Time
+			for _, m := range s.matches {
+				m.Mu.RLock()
+				t := m.State.UpdatedAt
+				m.Mu.RUnlock()
+				if newest == nil || t.After(newestTime) {
+					newest = m
+					newestTime = t
 				}
+			}
+			if newest != nil {
+				match = newest
+				exists = true
+				log.Printf("[GOTV] WebSocket: newest match fallback for UUID %s (matches: %d)", matchID, len(s.matches))
 			}
 			s.matchesMu.RUnlock()
 		}
