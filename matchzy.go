@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // MatchPhase representa a fase atual da partida
@@ -31,32 +29,27 @@ const (
 type MatchZyEventType string
 
 const (
+	EventSeriesStart        MatchZyEventType = "series_start"
 	EventGoingLive          MatchZyEventType = "going_live"
-	EventRoundStart         MatchZyEventType = "round_start"
 	EventRoundEnd           MatchZyEventType = "round_end"
 	EventMapResult          MatchZyEventType = "map_result"
-	EventSeriesResult       MatchZyEventType = "series_result"
+	EventSeriesEnd          MatchZyEventType = "series_end" // CORRIGIDO: era "series_result"
 	EventSidePicked         MatchZyEventType = "side_picked"
 	EventMapPicked          MatchZyEventType = "map_picked"
 	EventMapVetoed          MatchZyEventType = "map_vetoed"
 	EventPlayerDisconnected MatchZyEventType = "player_disconnect"
-	EventMatchPaused        MatchZyEventType = "match_paused"
-	EventMatchUnpaused      MatchZyEventType = "match_unpaused"
-	EventKnifeRoundStarted  MatchZyEventType = "knife_start"
-	EventKnifeRoundWon      MatchZyEventType = "knife_won"
+	EventDemoUploadEnded    MatchZyEventType = "demo_upload_ended"
 )
 
 // FlexibleString aceita tanto string quanto número no JSON unmarshal
 type FlexibleString string
 
 func (f *FlexibleString) UnmarshalJSON(data []byte) error {
-	// Tentar como string primeiro
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
 		*f = FlexibleString(s)
 		return nil
 	}
-	// Tentar como número
 	var n json.Number
 	if err := json.Unmarshal(data, &n); err == nil {
 		*f = FlexibleString(n.String())
@@ -65,13 +58,76 @@ func (f *FlexibleString) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("matchid must be string or number, got: %s", string(data))
 }
 
-// MatchZyEvent evento genérico do MatchZy
+// --- Structs que correspondem ao formato REAL do MatchZy ---
+
+// MatchZyEvent evento genérico do MatchZy (usado no histórico)
 type MatchZyEvent struct {
 	Event     MatchZyEventType       `json:"event"`
 	MatchID   FlexibleString         `json:"matchid"`
 	MapNumber int                    `json:"map_number,omitempty"`
 	Timestamp string                 `json:"timestamp,omitempty"`
 	Data      map[string]interface{} `json:"data,omitempty"`
+}
+
+// MatchZyPlayerStats stats de um jogador enviados pelo MatchZy no round_end e map_result
+type MatchZyPlayerStats struct {
+	Kills            int `json:"kills"`
+	Deaths           int `json:"deaths"`
+	Assists          int `json:"assists"`
+	FlashAssists     int `json:"flash_assists"`
+	TeamKills        int `json:"team_kills"`
+	Suicides         int `json:"suicides"`
+	Damage           int `json:"damage"`
+	UtilityDamage    int `json:"utility_damage"`
+	EnemiesFlashed   int `json:"enemies_flashed"`
+	FriendliesFlashed int `json:"friendlies_flashed"`
+	KnifeKills       int `json:"knife_kills"`
+	HeadshotKills    int `json:"headshot_kills"`
+	RoundsPlayed     int `json:"rounds_played"`
+	BombDefuses      int `json:"bomb_defuses"`
+	BombPlants       int `json:"bomb_plants"`
+	OneK             int `json:"1k"`
+	TwoK             int `json:"2k"`
+	ThreeK           int `json:"3k"`
+	FourK            int `json:"4k"`
+	FiveK            int `json:"5k"`
+	OneV1            int `json:"1v1"`
+	OneV2            int `json:"1v2"`
+	OneV3            int `json:"1v3"`
+	OneV4            int `json:"1v4"`
+	OneV5            int `json:"1v5"`
+	FirstKillsT      int `json:"first_kills_t"`
+	FirstKillsCT     int `json:"first_kills_ct"`
+	FirstDeathsT     int `json:"first_deaths_t"`
+	FirstDeathsCT    int `json:"first_deaths_ct"`
+	TradeKills       int `json:"trade_kills"`
+	Kast             int `json:"kast"`
+	Score            int `json:"score"`
+	Mvp              int `json:"mvp"`
+}
+
+// MatchZyStatsPlayer um jogador com suas stats
+type MatchZyStatsPlayer struct {
+	SteamID string             `json:"steamid"`
+	Name    string             `json:"name"`
+	Stats   MatchZyPlayerStats `json:"stats"`
+}
+
+// MatchZyStatsTeam um time com seus jogadores e stats
+type MatchZyStatsTeam struct {
+	ID          string               `json:"id"`
+	Name        string               `json:"name"`
+	SeriesScore int                  `json:"series_score"`
+	Score       int                  `json:"score"`
+	ScoreCT     int                  `json:"score_ct"`
+	ScoreT      int                  `json:"score_t"`
+	Players     []MatchZyStatsPlayer `json:"players"`
+}
+
+// MatchZyWinner informação do vencedor (objeto, não string)
+type MatchZyWinner struct {
+	Side string `json:"side"` // "ct" ou "t"
+	Team string `json:"team"` // "team1" ou "team2"
 }
 
 // MatchZyGoingLive evento quando a partida começa
@@ -81,34 +137,34 @@ type MatchZyGoingLive struct {
 	MapNumber int              `json:"map_number"`
 }
 
-// MatchZyRoundEnd evento de fim de round
+// MatchZyRoundEnd evento de fim de round (formato REAL do MatchZy)
 type MatchZyRoundEnd struct {
 	Event       MatchZyEventType `json:"event"`
 	MatchID     FlexibleString   `json:"matchid"`
 	MapNumber   int              `json:"map_number"`
 	RoundNumber int              `json:"round_number"`
-	RoundTime   int              `json:"round_time"`
+	RoundTime   int              `json:"round_time"` // milissegundos
 	Reason      int              `json:"reason"`
-	Winner      string           `json:"winner"` // "team1" ou "team2"
-	Team1Score  int              `json:"team1_score"`
-	Team2Score  int              `json:"team2_score"`
+	Winner      MatchZyWinner    `json:"winner"`
+	Team1       MatchZyStatsTeam `json:"team1"`
+	Team2       MatchZyStatsTeam `json:"team2"`
 }
 
-// MatchZyMapResult evento de fim de mapa
+// MatchZyMapResult evento de fim de mapa (formato REAL do MatchZy)
 type MatchZyMapResult struct {
-	Event      MatchZyEventType `json:"event"`
-	MatchID    FlexibleString   `json:"matchid"`
-	MapNumber  int              `json:"map_number"`
-	Winner     string           `json:"winner"` // "team1", "team2" ou "none"
-	Team1Score int              `json:"team1_score"`
-	Team2Score int              `json:"team2_score"`
+	Event     MatchZyEventType `json:"event"`
+	MatchID   FlexibleString   `json:"matchid"`
+	MapNumber int              `json:"map_number"`
+	Winner    MatchZyWinner    `json:"winner"`
+	Team1     MatchZyStatsTeam `json:"team1"`
+	Team2     MatchZyStatsTeam `json:"team2"`
 }
 
-// MatchZySeriesResult evento de fim de série
-type MatchZySeriesResult struct {
+// MatchZySeriesEnd evento de fim de série (formato REAL do MatchZy)
+type MatchZySeriesEnd struct {
 	Event            MatchZyEventType `json:"event"`
 	MatchID          FlexibleString   `json:"matchid"`
-	Winner           string           `json:"winner"`
+	Winner           MatchZyWinner    `json:"winner"`
 	Team1SeriesScore int              `json:"team1_series_score"`
 	Team2SeriesScore int              `json:"team2_series_score"`
 	TimeUntilRestore int              `json:"time_until_restore"`
@@ -119,17 +175,43 @@ type MatchZySidePicked struct {
 	Event     MatchZyEventType `json:"event"`
 	MatchID   FlexibleString   `json:"matchid"`
 	MapNumber int              `json:"map_number"`
-	Team      string           `json:"team"` // "team1" ou "team2"
-	Side      string           `json:"side"` // "CT" ou "T"
+	Team      string           `json:"team"`
+	Side      string           `json:"side"`
 }
 
-// MatchZyKnifeWon evento de vitória no knife
-type MatchZyKnifeWon struct {
+// MatchZyMapPicked evento de pick de mapa
+type MatchZyMapPicked struct {
 	Event     MatchZyEventType `json:"event"`
 	MatchID   FlexibleString   `json:"matchid"`
+	Team      string           `json:"team"`
+	MapName   string           `json:"map_name"`
 	MapNumber int              `json:"map_number"`
-	Winner    string           `json:"winner"` // "team1" ou "team2"
 }
+
+// MatchZyMapVetoed evento de ban de mapa
+type MatchZyMapVetoed struct {
+	Event   MatchZyEventType `json:"event"`
+	MatchID FlexibleString   `json:"matchid"`
+	Team    string           `json:"team"`
+	MapName string           `json:"map_name"`
+}
+
+// MatchZySeriesStart evento de início de série
+type MatchZySeriesStart struct {
+	Event   MatchZyEventType `json:"event"`
+	MatchID FlexibleString   `json:"matchid"`
+	NumMaps int              `json:"num_maps"`
+	Team1   struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"team1"`
+	Team2 struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"team2"`
+}
+
+// --- Estado do Servidor ---
 
 // MatchTeamInfo informações do time na partida
 type MatchTeamInfo struct {
@@ -137,28 +219,31 @@ type MatchTeamInfo struct {
 	Name        string `json:"name"`
 	Tag         string `json:"tag"`
 	LogoURL     string `json:"logoUrl,omitempty"`
-	CurrentSide string `json:"currentSide"` // "CT" ou "T"
+	CurrentSide string `json:"currentSide"`
 	Score       int    `json:"score"`
 	MapsWon     int    `json:"mapsWon"`
 }
 
 // MatchZyState estado completo da partida com dados do MatchZy
 type MatchZyState struct {
-	MatchID        string          `json:"matchId"`
-	Phase          MatchPhase      `json:"phase"`
-	IsCapturing    bool            `json:"isCapturing"` // true em LIVE ou OVERTIME
-	BestOf         int             `json:"bestOf"`
-	CurrentMap     int             `json:"currentMap"`
-	CurrentRound   int             `json:"currentRound"`
-	CurrentHalf    int             `json:"currentHalf"` // 1 ou 2
-	Team1          *MatchTeamInfo  `json:"team1,omitempty"`
-	Team2          *MatchTeamInfo  `json:"team2,omitempty"`
-	Team1StartSide string          `json:"team1StartSide"` // Lado que team1 começou
-	KnifeWinner    string          `json:"knifeWinner,omitempty"`
-	MapName        string          `json:"mapName"`
-	Events         []MatchZyEvent  `json:"events,omitempty"`
-	LastEvent      *MatchZyEvent   `json:"lastEvent,omitempty"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	MatchID        string         `json:"matchId"`
+	Phase          MatchPhase     `json:"phase"`
+	IsCapturing    bool           `json:"isCapturing"`
+	BestOf         int            `json:"bestOf"`
+	CurrentMap     int            `json:"currentMap"`
+	CurrentRound   int            `json:"currentRound"`
+	CurrentHalf    int            `json:"currentHalf"`
+	Team1          *MatchTeamInfo `json:"team1,omitempty"`
+	Team2          *MatchTeamInfo `json:"team2,omitempty"`
+	Team1StartSide string         `json:"team1StartSide"`
+	MapName        string         `json:"mapName"`
+	Events         []MatchZyEvent `json:"events,omitempty"`
+	LastEvent      *MatchZyEvent  `json:"lastEvent,omitempty"`
+	// Último round_end completo (com stats de jogadores) para persistência
+	LastRoundEnd   *MatchZyRoundEnd `json:"-"`
+	// Último map_result completo (com stats finais) para persistência
+	LastMapResult  *MatchZyMapResult `json:"-"`
+	UpdatedAt      time.Time        `json:"updatedAt"`
 	mu             sync.RWMutex
 }
 
@@ -193,49 +278,14 @@ func (s *MatchZyState) UpdatePhase(phase MatchPhase) {
 	s.Phase = phase
 	s.IsCapturing = phase == PhaseLive || phase == PhaseOvertime
 	s.UpdatedAt = time.Now()
-	log.Printf("[MatchZy] Match %s phase changed to: %s (capturing: %v)", s.MatchID, phase, s.IsCapturing)
+	log.Printf("[MatchZy] Match %s phase → %s (capturing: %v)", s.MatchID, phase, s.IsCapturing)
 }
 
-// SwapSides troca os lados dos times (halftime/overtime)
-func (s *MatchZyState) SwapSides() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.Team1 != nil && s.Team2 != nil {
-		if s.Team1.CurrentSide == "CT" {
-			s.Team1.CurrentSide = "T"
-			s.Team2.CurrentSide = "CT"
-		} else {
-			s.Team1.CurrentSide = "CT"
-			s.Team2.CurrentSide = "T"
-		}
-		s.CurrentHalf++
-		log.Printf("[MatchZy] Match %s sides swapped. Half: %d, Team1 now: %s",
-			s.MatchID, s.CurrentHalf, s.Team1.CurrentSide)
-	}
-	s.UpdatedAt = time.Now()
-}
-
-// GetTeamBySide retorna o time pelo lado atual
-func (s *MatchZyState) GetTeamBySide(side string) *MatchTeamInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.Team1 != nil && s.Team1.CurrentSide == side {
-		return s.Team1
-	}
-	if s.Team2 != nil && s.Team2.CurrentSide == side {
-		return s.Team2
-	}
-	return nil
-}
-
-// AddEvent adiciona um evento ao histórico com cap de MaxMatchZyEvents
+// AddEvent adiciona um evento ao histórico
 func (s *MatchZyState) AddEvent(event MatchZyEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Events = append(s.Events, event)
-	// Manter apenas os últimos MaxMatchZyEvents eventos
 	if len(s.Events) > MaxMatchZyEvents {
 		copy(s.Events, s.Events[len(s.Events)-MaxMatchZyEvents:])
 		s.Events = s.Events[:MaxMatchZyEvents]
@@ -244,32 +294,45 @@ func (s *MatchZyState) AddEvent(event MatchZyEvent) {
 	s.UpdatedAt = time.Now()
 }
 
+// GetTeamBySide retorna o time pelo lado atual
+func (s *MatchZyState) GetTeamBySide(side string) *MatchTeamInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Team1 != nil && strings.EqualFold(s.Team1.CurrentSide, side) {
+		return s.Team1
+	}
+	if s.Team2 != nil && strings.EqualFold(s.Team2.CurrentSide, side) {
+		return s.Team2
+	}
+	return nil
+}
+
+// --- Handler ---
+
 // MatchZyHandler gerencia eventos do MatchZy
 type MatchZyHandler struct {
 	states         map[string]*MatchZyState
 	statesMu       sync.RWMutex
 	gotvServer     *GOTVServer
 	authToken      string
-	gotvMatchMap   map[string]string // dbMatchID → gotvMatchID
-	mapMu          sync.RWMutex
 	supabase       *SupabaseClient
 	persister      *StatsPersister
 	eventPersister *EventPersister
 	uuidCache      map[string]string // numericMatchID → UUID cache
 	uuidMu         sync.RWMutex
-	// Tracking de round para persistência
-	roundTrackers  map[string]*RoundTracker // dbMatchID → tracker
-	roundMu        sync.RWMutex
 }
 
-// RoundTracker rastreia dados de um round em andamento para persistência
-type RoundTracker struct {
-	FirstKillSteamID  string
-	FirstDeathSteamID string
-	BombPlantedBy     string
-	BombDefusedBy     string
-	BombPlantSite     string
-	HasFirstKill      bool
+// NewMatchZyHandler cria um novo handler de eventos MatchZy
+func NewMatchZyHandler(gotvServer *GOTVServer, authToken string, supabase *SupabaseClient, persister *StatsPersister, eventPersister *EventPersister) *MatchZyHandler {
+	return &MatchZyHandler{
+		states:         make(map[string]*MatchZyState),
+		gotvServer:     gotvServer,
+		authToken:      authToken,
+		supabase:       supabase,
+		persister:      persister,
+		eventPersister: eventPersister,
+		uuidCache:      make(map[string]string),
+	}
 }
 
 // CleanupExpiredStates remove estados de partidas expiradas
@@ -285,35 +348,17 @@ func (h *MatchZyHandler) CleanupExpiredStates() {
 
 		if now.Sub(lastUpdate) > MatchExpirationTime {
 			delete(h.states, id)
-			log.Printf("[MatchZy] 🧹 Expired state removed: %s", id)
+			log.Printf("[MatchZy] Expired state removed: %s", id)
 		}
 	}
 }
 
-// NewMatchZyHandler cria um novo handler de eventos MatchZy
-func NewMatchZyHandler(gotvServer *GOTVServer, authToken string, supabase *SupabaseClient, persister *StatsPersister, eventPersister *EventPersister) *MatchZyHandler {
-	return &MatchZyHandler{
-		states:         make(map[string]*MatchZyState),
-		gotvServer:     gotvServer,
-		authToken:      authToken,
-		gotvMatchMap:   make(map[string]string),
-		supabase:       supabase,
-		persister:      persister,
-		eventPersister: eventPersister,
-		uuidCache:      make(map[string]string),
-		roundTrackers:  make(map[string]*RoundTracker),
-	}
-}
-
 // resolveMatchID resolve um matchID numérico (do MatchZy) para UUID real do banco
-// Se o matchID já é um UUID (contém "-"), retorna ele mesmo
 func (h *MatchZyHandler) resolveMatchID(matchID string) string {
-	// Se já é UUID, retornar direto
 	if strings.Contains(matchID, "-") {
 		return matchID
 	}
 
-	// Checar cache
 	h.uuidMu.RLock()
 	if uuid, ok := h.uuidCache[matchID]; ok {
 		h.uuidMu.RUnlock()
@@ -321,14 +366,12 @@ func (h *MatchZyHandler) resolveMatchID(matchID string) string {
 	}
 	h.uuidMu.RUnlock()
 
-	// Buscar no Supabase
 	if h.supabase != nil {
 		uuid, err := h.supabase.ResolveMatchUUID(matchID)
 		if err != nil {
 			log.Printf("[MatchZy] Failed to resolve matchID %s to UUID: %v", matchID, err)
-			return matchID // fallback: retorna o original
+			return matchID
 		}
-		// Salvar no cache
 		h.uuidMu.Lock()
 		h.uuidCache[matchID] = uuid
 		h.uuidMu.Unlock()
@@ -361,7 +404,6 @@ func (h *MatchZyHandler) GetState(matchID string) *MatchZyState {
 
 // HandleEvent processa um evento do MatchZy
 func (h *MatchZyHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
-	// CORS
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -370,7 +412,6 @@ func (h *MatchZyHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -380,12 +421,11 @@ func (h *MatchZyHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	expectedAuth := "Bearer " + h.authToken
 	if authHeader != expectedAuth {
-		log.Printf("[MatchZy] Unauthorized request. Expected: %s, Got: %s", expectedAuth, authHeader)
+		log.Printf("[MatchZy] Unauthorized. Expected: %s, Got: %s", expectedAuth, authHeader)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// Ler body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
@@ -395,7 +435,7 @@ func (h *MatchZyHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[MatchZy] Received event: %s", string(body))
 
-	// Parse evento genérico primeiro para identificar o tipo
+	// Parse evento genérico para identificar tipo
 	var genericEvent MatchZyEvent
 	if err := json.Unmarshal(body, &genericEvent); err != nil {
 		log.Printf("[MatchZy] Failed to parse event: %v", err)
@@ -403,40 +443,39 @@ func (h *MatchZyHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolver matchID numérico → UUID real do banco
+	// Resolver matchID numérico → UUID
 	rawMatchID := string(genericEvent.MatchID)
 	resolvedMatchID := h.resolveMatchID(rawMatchID)
 	if resolvedMatchID != rawMatchID {
 		log.Printf("[MatchZy] Resolved matchID: %s → %s", rawMatchID, resolvedMatchID)
 	}
 
-	// Obter ou criar estado da partida (usando UUID real)
+	// Obter ou criar estado e match room
 	state := h.GetOrCreateState(resolvedMatchID)
+	h.gotvServer.GetOrCreateMatch(resolvedMatchID)
 
-	// Processar evento baseado no tipo
+	// Processar evento
 	switch genericEvent.Event {
+	case EventSeriesStart:
+		h.handleSeriesStart(state, body)
 	case EventGoingLive:
 		h.handleGoingLive(state, body)
-	case EventKnifeRoundStarted:
-		h.handleKnifeStart(state, body)
-	case EventKnifeRoundWon:
-		h.handleKnifeWon(state, body)
 	case EventSidePicked:
 		h.handleSidePicked(state, body)
-	case EventRoundStart:
-		h.handleRoundStart(state, body)
+	case EventMapPicked:
+		h.handleMapPicked(state, body)
+	case EventMapVetoed:
+		h.handleMapVetoed(state, body)
 	case EventRoundEnd:
 		h.handleRoundEnd(state, body)
 	case EventMapResult:
 		h.handleMapResult(state, body)
-	case EventSeriesResult:
-		h.handleSeriesResult(state, body)
-	case EventMatchPaused:
-		state.UpdatePhase(PhasePaused)
-	case EventMatchUnpaused:
-		state.UpdatePhase(PhaseLive)
+	case EventSeriesEnd:
+		h.handleSeriesEnd(state, body)
 	case EventPlayerDisconnected:
-		h.handlePlayerDisconnected(state, body)
+		log.Printf("[MatchZy] Player disconnected in match %s", state.MatchID)
+	case EventDemoUploadEnded:
+		log.Printf("[MatchZy] Demo upload ended for match %s", state.MatchID)
 	default:
 		log.Printf("[MatchZy] Unknown event type: %s", genericEvent.Event)
 	}
@@ -451,6 +490,28 @@ func (h *MatchZyHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// handleSeriesStart processa início de série
+func (h *MatchZyHandler) handleSeriesStart(state *MatchZyState, body []byte) {
+	var event MatchZySeriesStart
+	if err := json.Unmarshal(body, &event); err != nil {
+		log.Printf("[MatchZy] Failed to parse series_start: %v", err)
+		return
+	}
+
+	state.mu.Lock()
+	state.BestOf = event.NumMaps
+	state.Phase = PhaseWarmup
+	state.mu.Unlock()
+
+	log.Printf("[MatchZy] Series started: match %s, BO%d, %s vs %s",
+		state.MatchID, event.NumMaps, event.Team1.Name, event.Team2.Name)
+
+	// Popular times do Supabase
+	if h.supabase != nil {
+		go h.populateTeamsFromDB(state)
+	}
+}
+
 // handleGoingLive processa evento de partida ao vivo
 func (h *MatchZyHandler) handleGoingLive(state *MatchZyState, body []byte) {
 	var event MatchZyGoingLive
@@ -460,37 +521,15 @@ func (h *MatchZyHandler) handleGoingLive(state *MatchZyState, body []byte) {
 	}
 
 	state.UpdatePhase(PhaseLive)
+	state.mu.Lock()
 	state.CurrentMap = event.MapNumber
 	state.CurrentRound = 1
 	state.CurrentHalf = 1
-	log.Printf("[MatchZy] Match %s is now LIVE! Map: %d", event.MatchID, event.MapNumber)
+	state.mu.Unlock()
 
-	// Vincular DB matchID → GOTV matchID
-	// Encontrar a partida GOTV ativa (normalmente só 1 no servidor)
-	// Prioriza match com parser rodando, mas aceita qualquer match ativa como fallback
-	h.gotvServer.matchesMu.RLock()
-	var fallbackGotvID string
-	linkedOk := false
-	for gotvID, match := range h.gotvServer.matches {
-		if match.ParserStarted {
-			h.mapMu.Lock()
-			h.gotvMatchMap[state.MatchID] = gotvID
-			h.mapMu.Unlock()
-			log.Printf("[MatchZy] Linked DB match %s → GOTV match %s (parser active)", state.MatchID, gotvID)
-			linkedOk = true
-			break
-		}
-		fallbackGotvID = gotvID
-	}
-	if !linkedOk && fallbackGotvID != "" {
-		h.mapMu.Lock()
-		h.gotvMatchMap[state.MatchID] = fallbackGotvID
-		h.mapMu.Unlock()
-		log.Printf("[MatchZy] Linked DB match %s → GOTV match %s (fallback, no parser)", state.MatchID, fallbackGotvID)
-	}
-	h.gotvServer.matchesMu.RUnlock()
+	log.Printf("[MatchZy] Match %s is now LIVE! Map: %d", state.MatchID, event.MapNumber)
 
-	// Popular times do Supabase
+	// Popular times do Supabase (caso series_start não tenha sido recebido)
 	if h.supabase != nil {
 		go h.populateTeamsFromDB(state)
 	}
@@ -507,72 +546,63 @@ func (h *MatchZyHandler) handleGoingLive(state *MatchZyState, body []byte) {
 
 // populateTeamsFromDB busca os dados dos times no Supabase e popula o state
 func (h *MatchZyHandler) populateTeamsFromDB(state *MatchZyState) {
+	// Verificar se já temos times populados
+	state.mu.RLock()
+	hasTeams := state.Team1 != nil && state.Team1.ID != ""
+	state.mu.RUnlock()
+	if hasTeams {
+		return
+	}
+
 	matchDetails, err := h.supabase.FetchMatchDetails(state.MatchID)
 	if err != nil {
 		log.Printf("[MatchZy] Failed to fetch match details from DB: %v", err)
 		return
 	}
 
-	// Popular Team1
-	if matchDetails.Team1 != nil {
-		logoURL := ""
-		if matchDetails.Team1.LogoURL != nil {
-			logoURL = *matchDetails.Team1.LogoURL
-		}
-		team1 := &MatchTeamInfo{
-			ID:          matchDetails.Team1.ID,
-			Name:        matchDetails.Team1.Name,
-			Tag:         matchDetails.Team1.Tag,
-			LogoURL:     logoURL,
-			CurrentSide: "CT", // Default, será corrigido pelo side_picked
-			Score:       0,
-		}
-
-		team2LogoURL := ""
-		if matchDetails.Team2 != nil && matchDetails.Team2.LogoURL != nil {
-			team2LogoURL = *matchDetails.Team2.LogoURL
-		}
-		team2 := &MatchTeamInfo{
-			ID:          matchDetails.Team2.ID,
-			Name:        matchDetails.Team2.Name,
-			Tag:         matchDetails.Team2.Tag,
-			LogoURL:     team2LogoURL,
-			CurrentSide: "T", // Default
-			Score:       0,
-		}
-
-		state.SetTeams(team1, team2)
-		state.BestOf = matchDetails.BestOf
-
-		log.Printf("[MatchZy] Teams populated from DB: %s (%s) vs %s (%s) - BO%d",
-			team1.Name, team1.Tag, team2.Name, team2.Tag, matchDetails.BestOf)
-	} else {
+	if matchDetails.Team1 == nil || matchDetails.Team2 == nil {
 		log.Printf("[MatchZy] No team data found in DB for match %s", state.MatchID)
-	}
-
-	// Broadcast atualização com dados dos times
-	h.broadcastStateUpdate(state)
-}
-
-// handleKnifeStart processa início do knife round
-func (h *MatchZyHandler) handleKnifeStart(state *MatchZyState, body []byte) {
-	state.UpdatePhase(PhaseKnife)
-	log.Printf("[MatchZy] Match %s knife round started", state.MatchID)
-}
-
-// handleKnifeWon processa vitória no knife round
-func (h *MatchZyHandler) handleKnifeWon(state *MatchZyState, body []byte) {
-	var event MatchZyKnifeWon
-	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("[MatchZy] Failed to parse knife_won: %v", err)
 		return
 	}
 
+	logoURL1 := ""
+	if matchDetails.Team1.LogoURL != nil {
+		logoURL1 = *matchDetails.Team1.LogoURL
+	}
+	logoURL2 := ""
+	if matchDetails.Team2.LogoURL != nil {
+		logoURL2 = *matchDetails.Team2.LogoURL
+	}
+
+	team1 := &MatchTeamInfo{
+		ID:          matchDetails.Team1.ID,
+		Name:        matchDetails.Team1.Name,
+		Tag:         matchDetails.Team1.Tag,
+		LogoURL:     logoURL1,
+		CurrentSide: "CT",
+		Score:       0,
+	}
+	team2 := &MatchTeamInfo{
+		ID:          matchDetails.Team2.ID,
+		Name:        matchDetails.Team2.Name,
+		Tag:         matchDetails.Team2.Tag,
+		LogoURL:     logoURL2,
+		CurrentSide: "T",
+		Score:       0,
+	}
+
+	state.SetTeams(team1, team2)
 	state.mu.Lock()
-	state.KnifeWinner = event.Winner
+	state.BestOf = matchDetails.BestOf
+	if matchDetails.MapName != nil {
+		state.MapName = *matchDetails.MapName
+	}
 	state.mu.Unlock()
 
-	log.Printf("[MatchZy] Match %s knife won by: %s", state.MatchID, event.Winner)
+	log.Printf("[MatchZy] Teams populated: %s (%s) vs %s (%s) - BO%d",
+		team1.Name, team1.Tag, team2.Name, team2.Tag, matchDetails.BestOf)
+
+	h.broadcastStateUpdate(state)
 }
 
 // handleSidePicked processa escolha de lado
@@ -584,31 +614,27 @@ func (h *MatchZyHandler) handleSidePicked(state *MatchZyState, body []byte) {
 	}
 
 	state.mu.Lock()
-	// Se team1 escolheu, configurar os lados
+	side := strings.ToUpper(event.Side)
+	oppositeSide := "T"
+	if side == "T" {
+		oppositeSide = "CT"
+	}
+
 	if event.Team == "team1" {
 		if state.Team1 != nil {
-			state.Team1.CurrentSide = event.Side
-			state.Team1StartSide = event.Side
+			state.Team1.CurrentSide = side
+			state.Team1StartSide = side
 		}
 		if state.Team2 != nil {
-			if event.Side == "CT" {
-				state.Team2.CurrentSide = "T"
-			} else {
-				state.Team2.CurrentSide = "CT"
-			}
+			state.Team2.CurrentSide = oppositeSide
 		}
-	} else { // team2 escolheu
+	} else {
 		if state.Team2 != nil {
-			state.Team2.CurrentSide = event.Side
+			state.Team2.CurrentSide = side
 		}
 		if state.Team1 != nil {
-			if event.Side == "CT" {
-				state.Team1.CurrentSide = "T"
-				state.Team1StartSide = "T"
-			} else {
-				state.Team1.CurrentSide = "CT"
-				state.Team1StartSide = "CT"
-			}
+			state.Team1.CurrentSide = oppositeSide
+			state.Team1StartSide = oppositeSide
 		}
 	}
 	state.mu.Unlock()
@@ -616,20 +642,27 @@ func (h *MatchZyHandler) handleSidePicked(state *MatchZyState, body []byte) {
 	log.Printf("[MatchZy] Match %s: %s picked %s side", state.MatchID, event.Team, event.Side)
 }
 
-// handleRoundStart processa início de round
-func (h *MatchZyHandler) handleRoundStart(state *MatchZyState, body []byte) {
-	// Round start apenas atualiza o contador
-	state.mu.Lock()
-	state.CurrentRound++
-	state.mu.Unlock()
-
-	// Resetar tracker para o novo round
-	h.roundMu.Lock()
-	h.roundTrackers[state.MatchID] = &RoundTracker{}
-	h.roundMu.Unlock()
+// handleMapPicked processa pick de mapa
+func (h *MatchZyHandler) handleMapPicked(state *MatchZyState, body []byte) {
+	var event MatchZyMapPicked
+	if err := json.Unmarshal(body, &event); err != nil {
+		log.Printf("[MatchZy] Failed to parse map_picked: %v", err)
+		return
+	}
+	log.Printf("[MatchZy] Match %s: %s picked %s (map #%d)", state.MatchID, event.Team, event.MapName, event.MapNumber)
 }
 
-// handleRoundEnd processa fim de round
+// handleMapVetoed processa ban de mapa
+func (h *MatchZyHandler) handleMapVetoed(state *MatchZyState, body []byte) {
+	var event MatchZyMapVetoed
+	if err := json.Unmarshal(body, &event); err != nil {
+		log.Printf("[MatchZy] Failed to parse map_vetoed: %v", err)
+		return
+	}
+	log.Printf("[MatchZy] Match %s: %s banned %s", state.MatchID, event.Team, event.MapName)
+}
+
+// handleRoundEnd processa fim de round (dados completos do MatchZy)
 func (h *MatchZyHandler) handleRoundEnd(state *MatchZyState, body []byte) {
 	var event MatchZyRoundEnd
 	if err := json.Unmarshal(body, &event); err != nil {
@@ -639,142 +672,144 @@ func (h *MatchZyHandler) handleRoundEnd(state *MatchZyState, body []byte) {
 
 	state.mu.Lock()
 	state.CurrentRound = event.RoundNumber
+	state.LastRoundEnd = &event
 
-	// Atualizar scores
+	// Atualizar scores usando os dados da struct Team1/Team2 do MatchZy
 	if state.Team1 != nil {
-		state.Team1.Score = event.Team1Score
+		state.Team1.Score = event.Team1.Score
 	}
 	if state.Team2 != nil {
-		state.Team2.Score = event.Team2Score
+		state.Team2.Score = event.Team2.Score
 	}
 
 	// Verificar halftime (round 12 em MR12)
-	if event.RoundNumber == 12 {
+	if event.RoundNumber == 12 && event.Team1.Score+event.Team2.Score == 12 {
 		state.mu.Unlock()
 		state.UpdatePhase(PhaseHalftime)
-		// Swap após um pequeno delay seria feito pelo evento de round_start do half 2
-		log.Printf("[MatchZy] Match %s reached halftime", state.MatchID)
-		return
-	}
-
-	// Verificar overtime (empate 12-12)
-	if event.Team1Score == 12 && event.Team2Score == 12 {
+		// Swap lados automaticamente no halftime
+		state.mu.Lock()
+		if state.Team1 != nil && state.Team2 != nil {
+			if state.Team1.CurrentSide == "CT" {
+				state.Team1.CurrentSide = "T"
+				state.Team2.CurrentSide = "CT"
+			} else {
+				state.Team1.CurrentSide = "CT"
+				state.Team2.CurrentSide = "T"
+			}
+			state.CurrentHalf = 2
+		}
+		state.mu.Unlock()
+		log.Printf("[MatchZy] Match %s reached halftime - sides swapped", state.MatchID)
+	} else if event.Team1.Score == 12 && event.Team2.Score == 12 {
 		state.mu.Unlock()
 		state.UpdatePhase(PhaseOvertime)
 		log.Printf("[MatchZy] Match %s entered overtime", state.MatchID)
-		return
+	} else {
+		state.mu.Unlock()
 	}
 
-	state.mu.Unlock()
-
-	log.Printf("[MatchZy] Match %s round %d ended. Score: %d-%d. Winner: %s",
-		state.MatchID, event.RoundNumber, event.Team1Score, event.Team2Score, event.Winner)
+	log.Printf("[MatchZy] Match %s round %d ended. Score: %d-%d. Winner: %s (%s)",
+		state.MatchID, event.RoundNumber, event.Team1.Score, event.Team2.Score,
+		event.Winner.Team, event.Winner.Side)
 
 	// Atualizar scores no Supabase em tempo real
 	if h.supabase != nil {
 		go func() {
-			if err := h.supabase.UpdateMatchScores(state.MatchID, event.Team1Score, event.Team2Score); err != nil {
+			if err := h.supabase.UpdateMatchScores(state.MatchID, event.Team1.Score, event.Team2.Score); err != nil {
 				log.Printf("[MatchZy] Failed to update scores in DB: %v", err)
 			}
 		}()
 	}
 
 	// Persistir dados do round no banco
-	if h.eventPersister != nil && h.gotvServer != nil && h.gotvServer.teamRegistry != nil {
-		go func() {
-			teamRegistry := h.gotvServer.teamRegistry
-			teamRegistry.RefreshIfNeeded()
-
-			// Determinar winner_team_id e lados CT/T
-			var winnerTeamID, ctTeamID, tTeamID string
-			state.mu.RLock()
-			if state.Team1 != nil && state.Team2 != nil {
-				// Determinar quem é CT e quem é T
-				if state.Team1.CurrentSide == "CT" {
-					ctTeamID = state.Team1.ID
-					tTeamID = state.Team2.ID
-				} else {
-					ctTeamID = state.Team2.ID
-					tTeamID = state.Team1.ID
-				}
-
-				// Determinar winner
-				if event.Winner == "team1" {
-					winnerTeamID = state.Team1.ID
-				} else if event.Winner == "team2" {
-					winnerTeamID = state.Team2.ID
-				}
-			}
-			state.mu.RUnlock()
-
-			// Mapear reason do MatchZy para string legível
-			winReason := matchzyRoundReason(event.Reason)
-
-			// Pegar dados do tracker
-			h.roundMu.Lock()
-			tracker := h.roundTrackers[state.MatchID]
-			roundData := RoundPersistData{
-				RoundNumber:     event.RoundNumber,
-				WinnerTeamID:    winnerTeamID,
-				WinReason:       winReason,
-				CTTeamID:        ctTeamID,
-				TTeamID:         tTeamID,
-				DurationSeconds: event.RoundTime,
-			}
-
-			// Ajustar scores baseado nos lados
-			// MatchZy envia team1_score e team2_score, não CT/T scores
-			// Precisamos mapear baseado no lado atual
-			state.mu.RLock()
-			if state.Team1 != nil && state.Team1.CurrentSide == "CT" {
-				roundData.CTScore = event.Team1Score
-				roundData.TScore = event.Team2Score
-			} else {
-				roundData.CTScore = event.Team2Score
-				roundData.TScore = event.Team1Score
-			}
-			state.mu.RUnlock()
-
-			if tracker != nil {
-				// Resolver SteamIDs para profile_ids
-				if tracker.FirstKillSteamID != "" {
-					profileID := teamRegistry.GetProfileIDBySteamID(tracker.FirstKillSteamID)
-					if profileID != "" {
-						roundData.FirstKillProfileID = profileID
-					}
-				}
-				if tracker.FirstDeathSteamID != "" {
-					profileID := teamRegistry.GetProfileIDBySteamID(tracker.FirstDeathSteamID)
-					if profileID != "" {
-						roundData.FirstDeathProfileID = profileID
-					}
-				}
-				if tracker.BombPlantedBy != "" {
-					profileID := teamRegistry.GetProfileIDBySteamID(tracker.BombPlantedBy)
-					if profileID != "" {
-						roundData.BombPlantedBy = profileID
-					}
-				}
-				if tracker.BombDefusedBy != "" {
-					profileID := teamRegistry.GetProfileIDBySteamID(tracker.BombDefusedBy)
-					if profileID != "" {
-						roundData.BombDefusedBy = profileID
-					}
-				}
-				roundData.BombPlantSite = tracker.BombPlantSite
-			}
-
-			// Resetar tracker para o próximo round
-			h.roundTrackers[state.MatchID] = &RoundTracker{}
-			h.roundMu.Unlock()
-
-			h.eventPersister.PersistRound(state.MatchID, roundData)
-		}()
+	if h.eventPersister != nil {
+		go h.persistRoundData(state, &event)
 	}
 }
 
-// matchzyRoundReason mapeia o código de razão do MatchZy para string legível
-// Baseado nos valores do CSRoundEndReason do CS2
+// persistRoundData persiste os dados de um round usando dados diretamente do MatchZy
+func (h *MatchZyHandler) persistRoundData(state *MatchZyState, event *MatchZyRoundEnd) {
+	state.mu.RLock()
+	var winnerTeamID, ctTeamID, tTeamID string
+	if state.Team1 != nil && state.Team2 != nil {
+		if state.Team1.CurrentSide == "CT" {
+			ctTeamID = state.Team1.ID
+			tTeamID = state.Team2.ID
+		} else {
+			ctTeamID = state.Team2.ID
+			tTeamID = state.Team1.ID
+		}
+		if event.Winner.Team == "team1" {
+			winnerTeamID = state.Team1.ID
+		} else if event.Winner.Team == "team2" {
+			winnerTeamID = state.Team2.ID
+		}
+	}
+	state.mu.RUnlock()
+
+	winReason := matchzyRoundReason(event.Reason)
+
+	// Calcular CT/T scores baseado nos lados
+	var ctScore, tScore int
+	state.mu.RLock()
+	if state.Team1 != nil && state.Team1.CurrentSide == "CT" {
+		ctScore = event.Team1.Score
+		tScore = event.Team2.Score
+	} else {
+		ctScore = event.Team2.Score
+		tScore = event.Team1.Score
+	}
+	state.mu.RUnlock()
+
+	// Extrair first kill/death do round a partir dos player stats
+	// O MatchZy fornece first_kills_ct e first_kills_t nos stats dos jogadores
+	var firstKillProfileID, firstDeathProfileID string
+	teamRegistry := h.gotvServer.teamRegistry
+	if teamRegistry != nil {
+		teamRegistry.RefreshIfNeeded()
+
+		// Buscar first kill e first death nos stats dos jogadores de ambos os times
+		allPlayers := append(event.Team1.Players, event.Team2.Players...)
+		for _, player := range allPlayers {
+			fk := player.Stats.FirstKillsCT + player.Stats.FirstKillsT
+			fd := player.Stats.FirstDeathsCT + player.Stats.FirstDeathsT
+			if fk > 0 && firstKillProfileID == "" {
+				profileID := teamRegistry.GetProfileIDBySteamID(player.SteamID)
+				if profileID != "" {
+					firstKillProfileID = profileID
+				}
+			}
+			if fd > 0 && firstDeathProfileID == "" {
+				profileID := teamRegistry.GetProfileIDBySteamID(player.SteamID)
+				if profileID != "" {
+					firstDeathProfileID = profileID
+				}
+			}
+		}
+	}
+
+	roundData := RoundPersistData{
+		RoundNumber:         event.RoundNumber,
+		WinnerTeamID:        winnerTeamID,
+		WinReason:           winReason,
+		CTTeamID:            ctTeamID,
+		TTeamID:             tTeamID,
+		CTScore:             ctScore,
+		TScore:              tScore,
+		DurationSeconds:     event.RoundTime / 1000, // MatchZy envia em ms
+		FirstKillProfileID:  firstKillProfileID,
+		FirstDeathProfileID: firstDeathProfileID,
+	}
+
+	// Bomb info extraída do reason
+	if event.Reason == 1 { // target_bombed
+		roundData.BombPlantSite = "" // MatchZy não envia site no round_end
+	}
+
+	h.eventPersister.PersistRound(state.MatchID, roundData)
+}
+
+// matchzyRoundReason mapeia o código de razão para string legível
 func matchzyRoundReason(reason int) string {
 	switch reason {
 	case 1:
@@ -803,13 +838,24 @@ func (h *MatchZyHandler) handleMapResult(state *MatchZyState, body []byte) {
 	}
 
 	state.mu.Lock()
-	// Atualizar maps ganhos
-	if event.Winner == "team1" && state.Team1 != nil {
+	state.LastMapResult = &event
+	if event.Winner.Team == "team1" && state.Team1 != nil {
 		state.Team1.MapsWon++
-	} else if event.Winner == "team2" && state.Team2 != nil {
+	} else if event.Winner.Team == "team2" && state.Team2 != nil {
 		state.Team2.MapsWon++
 	}
+	// Atualizar scores finais
+	if state.Team1 != nil {
+		state.Team1.Score = event.Team1.Score
+	}
+	if state.Team2 != nil {
+		state.Team2.Score = event.Team2.Score
+	}
 	state.mu.Unlock()
+
+	log.Printf("[MatchZy] Match %s map %d finished. Winner: %s (%s), Score: %d-%d",
+		state.MatchID, event.MapNumber, event.Winner.Team, event.Winner.Side,
+		event.Team1.Score, event.Team2.Score)
 
 	// Se for BO1, a partida terminou
 	if state.BestOf <= 1 {
@@ -817,182 +863,69 @@ func (h *MatchZyHandler) handleMapResult(state *MatchZyState, body []byte) {
 
 		// Persistir stats e chamar finish API
 		if h.persister != nil {
-			go h.persistMatchData(state)
+			go h.persistMatchData(state, &event)
 		}
 	}
-
-	log.Printf("[MatchZy] Match %s map %d finished. Winner: %s, Score: %d-%d",
-		state.MatchID, event.MapNumber, event.Winner, event.Team1Score, event.Team2Score)
 }
 
-// handleSeriesResult processa fim de série (BO3, etc)
-func (h *MatchZyHandler) handleSeriesResult(state *MatchZyState, body []byte) {
-	var event MatchZySeriesResult
+// handleSeriesEnd processa fim de série
+func (h *MatchZyHandler) handleSeriesEnd(state *MatchZyState, body []byte) {
+	var event MatchZySeriesEnd
 	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("[MatchZy] Failed to parse series_result: %v", err)
+		log.Printf("[MatchZy] Failed to parse series_end: %v", err)
 		return
 	}
 
 	state.UpdatePhase(PhaseFinished)
 
-	log.Printf("[MatchZy] Match %s series finished! Winner: %s, Series score: %d-%d",
-		state.MatchID, event.Winner, event.Team1SeriesScore, event.Team2SeriesScore)
+	log.Printf("[MatchZy] Match %s series finished! Winner: %s (%s), Series: %d-%d",
+		state.MatchID, event.Winner.Team, event.Winner.Side,
+		event.Team1SeriesScore, event.Team2SeriesScore)
 
-	// Persistir stats e chamar finish API
-	if h.persister != nil {
-		go h.persistMatchData(state)
-	}
-}
+	// Para séries, usar o último map_result para stats
+	state.mu.RLock()
+	lastMap := state.LastMapResult
+	state.mu.RUnlock()
 
-// persistMatchData persiste stats dos jogadores e chama finish API
-func (h *MatchZyHandler) persistMatchData(state *MatchZyState) {
-	dbMatchID := state.MatchID
-
-	// Encontrar o GOTV match vinculado
-	h.mapMu.RLock()
-	gotvID, linked := h.gotvMatchMap[dbMatchID]
-	h.mapMu.RUnlock()
-
-	if !linked {
-		log.Printf("[MatchZy] No GOTV match linked for DB match %s - trying to find active match", dbMatchID)
-		// Fallback: tentar encontrar qualquer match ativa
-		h.gotvServer.matchesMu.RLock()
-		for id, match := range h.gotvServer.matches {
-			if match.ParserStarted {
-				gotvID = id
-				linked = true
-				break
-			}
-		}
-		h.gotvServer.matchesMu.RUnlock()
-	}
-
-	if !linked {
-		log.Printf("[MatchZy] Cannot persist - no GOTV match found for DB match %s", dbMatchID)
-		// Ainda chamar finish API mesmo sem stats do parser
-		if h.persister != nil {
+	if h.persister != nil && lastMap != nil {
+		go h.persistMatchData(state, lastMap)
+	} else if h.persister != nil {
+		// Fallback: chamar finish API mesmo sem stats detalhados
+		go func() {
 			team1Score := 0
 			team2Score := 0
+			state.mu.RLock()
 			if state.Team1 != nil {
 				team1Score = state.Team1.Score
 			}
 			if state.Team2 != nil {
 				team2Score = state.Team2.Score
 			}
-			if err := h.persister.CallFinishAPI(dbMatchID, team1Score, team2Score); err != nil {
+			state.mu.RUnlock()
+			if err := h.persister.CallFinishAPI(state.MatchID, team1Score, team2Score); err != nil {
 				log.Printf("[MatchZy] Failed to call finish API: %v", err)
 			}
-		}
-		return
+		}()
 	}
+}
 
-	h.gotvServer.matchesMu.RLock()
-	match := h.gotvServer.matches[gotvID]
-	h.gotvServer.matchesMu.RUnlock()
+// persistMatchData persiste stats dos jogadores usando dados do MatchZy webhook
+func (h *MatchZyHandler) persistMatchData(state *MatchZyState, mapResult *MatchZyMapResult) {
+	dbMatchID := state.MatchID
 
-	if match == nil {
-		log.Printf("[MatchZy] GOTV match %s not found in server matches", gotvID)
-		return
-	}
+	// Extrair scores do map_result
+	team1Score := mapResult.Team1.Score
+	team2Score := mapResult.Team2.Score
 
-	if err := h.persister.PersistMatchStats(dbMatchID, match, state); err != nil {
+	// Persistir player stats usando dados do MatchZy (não do parser GOTV!)
+	if err := h.persister.PersistMatchStatsFromMatchZy(dbMatchID, state, mapResult); err != nil {
 		log.Printf("[MatchZy] Failed to persist match stats: %v", err)
 	}
-}
 
-// HandleParserEvent recebe eventos do parser GOTV e persiste no banco
-// É chamado pelo callback onEvent do parser (definido em main.go)
-func (h *MatchZyHandler) HandleParserEvent(gotvMatchID string, event GameEvent) {
-	if h.eventPersister == nil {
-		return
+	// Chamar finish API para avançar bracket
+	if err := h.persister.CallFinishAPI(dbMatchID, team1Score, team2Score); err != nil {
+		log.Printf("[MatchZy] Failed to call finish API: %v", err)
 	}
-
-	// Encontrar o dbMatchID a partir do gotvMatchID
-	dbMatchID := ""
-	h.mapMu.RLock()
-	for dbID, gID := range h.gotvMatchMap {
-		if gID == gotvMatchID {
-			dbMatchID = dbID
-			break
-		}
-	}
-	h.mapMu.RUnlock()
-
-	if dbMatchID == "" {
-		return // Sem match vinculado, não persistir
-	}
-
-	switch event.Type {
-	case "kill":
-		go h.eventPersister.PersistKillEvent(dbMatchID, event)
-
-		// Rastrear first kill/death do round
-		h.roundMu.Lock()
-		tracker, exists := h.roundTrackers[dbMatchID]
-		if !exists {
-			tracker = &RoundTracker{}
-			h.roundTrackers[dbMatchID] = tracker
-		}
-		if !tracker.HasFirstKill {
-			tracker.HasFirstKill = true
-			if attacker, ok := event.Data["attacker"].(map[string]interface{}); ok {
-				if steamID, ok := attacker["steamId"].(string); ok {
-					tracker.FirstKillSteamID = steamID
-				}
-			}
-			if victim, ok := event.Data["victim"].(map[string]interface{}); ok {
-				if steamID, ok := victim["steamId"].(string); ok {
-					tracker.FirstDeathSteamID = steamID
-				}
-			}
-		}
-		h.roundMu.Unlock()
-
-	case "bomb_planted":
-		go h.eventPersister.PersistBombEvent(dbMatchID, event)
-
-		// Rastrear bomb planted para o round
-		h.roundMu.Lock()
-		tracker, exists := h.roundTrackers[dbMatchID]
-		if !exists {
-			tracker = &RoundTracker{}
-			h.roundTrackers[dbMatchID] = tracker
-		}
-		if planter, ok := event.Data["planter"].(map[string]interface{}); ok {
-			if steamID, ok := planter["steamId"].(string); ok {
-				tracker.BombPlantedBy = steamID
-			}
-		}
-		if site, ok := event.Data["site"].(string); ok {
-			tracker.BombPlantSite = site
-		}
-		h.roundMu.Unlock()
-
-	case "bomb_defused":
-		go h.eventPersister.PersistBombEvent(dbMatchID, event)
-
-		// Rastrear bomb defused para o round
-		h.roundMu.Lock()
-		tracker, exists := h.roundTrackers[dbMatchID]
-		if !exists {
-			tracker = &RoundTracker{}
-			h.roundTrackers[dbMatchID] = tracker
-		}
-		if defuser, ok := event.Data["defuser"].(map[string]interface{}); ok {
-			if steamID, ok := defuser["steamId"].(string); ok {
-				tracker.BombDefusedBy = steamID
-			}
-		}
-		h.roundMu.Unlock()
-
-	case "bomb_exploded":
-		go h.eventPersister.PersistBombEvent(dbMatchID, event)
-	}
-}
-
-// handlePlayerDisconnected processa desconexão de jogador
-func (h *MatchZyHandler) handlePlayerDisconnected(state *MatchZyState, body []byte) {
-	log.Printf("[MatchZy] Player disconnected in match %s", state.MatchID)
 }
 
 // broadcastStateUpdate envia atualização de estado para clientes WebSocket
@@ -1001,40 +934,7 @@ func (h *MatchZyHandler) broadcastStateUpdate(state *MatchZyState) {
 		return
 	}
 
-	// Tentar encontrar o match pelo mapa dbMatchID → gotvMatchID
-	h.mapMu.RLock()
-	gotvID, linked := h.gotvMatchMap[state.MatchID]
-	h.mapMu.RUnlock()
-
-	var match *ActiveMatch
-	var exists bool
-
-	if linked {
-		h.gotvServer.matchesMu.RLock()
-		match, exists = h.gotvServer.matches[gotvID]
-		h.gotvServer.matchesMu.RUnlock()
-	}
-
-	if !exists {
-		// Fallback: tentar pelo matchID direto (caso não tenha sido vinculado ainda)
-		h.gotvServer.matchesMu.RLock()
-		match, exists = h.gotvServer.matches[state.MatchID]
-		if !exists {
-			// Último fallback: broadcast para qualquer match ativa
-			for _, m := range h.gotvServer.matches {
-				match = m
-				exists = true
-				break
-			}
-		}
-		h.gotvServer.matchesMu.RUnlock()
-	}
-
-	if !exists || match == nil {
-		return
-	}
-
-	// Criar mensagem com estado do MatchZy
+	// Broadcast direto pelo matchID (UUID) — sem mais gotvMatchMap!
 	msg := WebSocketMessage{
 		Type:      "matchzy_state",
 		MatchID:   state.MatchID,
@@ -1042,20 +942,15 @@ func (h *MatchZyHandler) broadcastStateUpdate(state *MatchZyState) {
 		Timestamp: time.Now().UnixMilli(),
 	}
 
-	msgBytes, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("[MatchZy] Failed to marshal state: %v", err)
-		return
-	}
+	h.gotvServer.broadcastToMatch(state.MatchID, msg)
 
-	// Broadcast para todos os clientes
-	match.ClientsMu.RLock()
-	for client := range match.Clients {
-		if err := client.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
-			log.Printf("[MatchZy] Failed to send to client: %v", err)
-		}
+	// Atualizar timestamp da match room
+	h.gotvServer.matchesMu.RLock()
+	match, exists := h.gotvServer.matches[state.MatchID]
+	h.gotvServer.matchesMu.RUnlock()
+	if exists {
+		match.UpdatedAt = time.Now()
 	}
-	match.ClientsMu.RUnlock()
 }
 
 // RegisterRoutes registra as rotas do MatchZy no servidor
@@ -1063,8 +958,8 @@ func (h *MatchZyHandler) RegisterRoutes() {
 	http.HandleFunc("/api/matchzy/events", loggingMiddleware(h.HandleEvent))
 	http.HandleFunc("/api/matchzy/state/", loggingMiddleware(h.handleGetState))
 	log.Printf("[MatchZy] Routes registered:")
-	log.Printf("  - POST /api/matchzy/events - Receive MatchZy webhooks")
-	log.Printf("  - GET  /api/matchzy/state/{matchId} - Get match state")
+	log.Printf("  - POST /api/matchzy/events       - Receive MatchZy webhooks")
+	log.Printf("  - GET  /api/matchzy/state/{id}    - Get match state")
 }
 
 // handleGetState retorna o estado atual de uma partida
@@ -1072,7 +967,6 @@ func (h *MatchZyHandler) handleGetState(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
 
-	// Parse matchId from URL
 	path := strings.TrimPrefix(r.URL.Path, "/api/matchzy/state/")
 	matchID := strings.TrimSuffix(path, "/")
 
@@ -1081,10 +975,8 @@ func (h *MatchZyHandler) handleGetState(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Tentar com UUID direto, senão resolver numérico
 	state := h.GetState(matchID)
 	if state == nil {
-		// Tentar resolver como numérico
 		resolved := h.resolveMatchID(matchID)
 		if resolved != matchID {
 			state = h.GetState(resolved)
