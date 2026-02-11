@@ -64,8 +64,8 @@ type MatchFromDB struct {
 
 // NewSupabaseClient cria um novo cliente Supabase
 func NewSupabaseClient() *SupabaseClient {
-	baseURL := os.Getenv("SUPABASE_URL")
-	apiKey := os.Getenv("SUPABASE_ANON_KEY")
+	baseURL := strings.TrimSpace(os.Getenv("SUPABASE_URL"))
+	apiKey := strings.TrimSpace(os.Getenv("SUPABASE_ANON_KEY"))
 
 	if baseURL == "" || apiKey == "" {
 		log.Printf("[Supabase] Warning: SUPABASE_URL or SUPABASE_ANON_KEY not set")
