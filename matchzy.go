@@ -467,15 +467,26 @@ func (h *MatchZyHandler) handleGoingLive(state *MatchZyState, body []byte) {
 
 	// Vincular DB matchID → GOTV matchID
 	// Encontrar a partida GOTV ativa (normalmente só 1 no servidor)
+	// Prioriza match com parser rodando, mas aceita qualquer match ativa como fallback
 	h.gotvServer.matchesMu.RLock()
+	var fallbackGotvID string
+	linkedOk := false
 	for gotvID, match := range h.gotvServer.matches {
 		if match.ParserStarted {
 			h.mapMu.Lock()
 			h.gotvMatchMap[state.MatchID] = gotvID
 			h.mapMu.Unlock()
-			log.Printf("[MatchZy] Linked DB match %s → GOTV match %s", state.MatchID, gotvID)
+			log.Printf("[MatchZy] Linked DB match %s → GOTV match %s (parser active)", state.MatchID, gotvID)
+			linkedOk = true
 			break
 		}
+		fallbackGotvID = gotvID
+	}
+	if !linkedOk && fallbackGotvID != "" {
+		h.mapMu.Lock()
+		h.gotvMatchMap[state.MatchID] = fallbackGotvID
+		h.mapMu.Unlock()
+		log.Printf("[MatchZy] Linked DB match %s → GOTV match %s (fallback, no parser)", state.MatchID, fallbackGotvID)
 	}
 	h.gotvServer.matchesMu.RUnlock()
 
