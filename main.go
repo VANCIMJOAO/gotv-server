@@ -742,6 +742,40 @@ func (s *GOTVServer) handleGetMatch(w http.ResponseWriter, r *http.Request) {
 	match, exists := s.matches[matchID]
 	s.matchesMu.RUnlock()
 
+	// Fallback 1: Tentar via gotvMatchMap (UUID → GOTV session ID)
+	if !exists && s.matchzyHandler != nil {
+		s.matchzyHandler.mapMu.RLock()
+		gotvID, linked := s.matchzyHandler.gotvMatchMap[matchID]
+		s.matchzyHandler.mapMu.RUnlock()
+		if linked {
+			s.matchesMu.RLock()
+			match, exists = s.matches[gotvID]
+			s.matchesMu.RUnlock()
+		}
+	}
+
+	// Fallback 2: Usar a match mais recente (quando só tem 1 partida ativa)
+	if !exists {
+		s.matchesMu.RLock()
+		var newest *ActiveMatch
+		var newestTime time.Time
+		for _, m := range s.matches {
+			m.Mu.RLock()
+			t := m.State.UpdatedAt
+			m.Mu.RUnlock()
+			if newest == nil || t.After(newestTime) {
+				newest = m
+				newestTime = t
+			}
+		}
+		if newest != nil {
+			match = newest
+			exists = true
+			log.Printf("[GOTV] REST: newest match fallback for %s (matches: %d)", matchID, len(s.matches))
+		}
+		s.matchesMu.RUnlock()
+	}
+
 	if !exists {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Match not found"})

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -577,25 +578,40 @@ func (c *SupabaseClient) ResolveMatchUUID(numericMatchID string) (string, error)
 
 // queryMatchByConfig busca partida pelo matchid exato no matchzy_config
 func (c *SupabaseClient) queryMatchByConfig(numericMatchID string) (string, error) {
-	url := fmt.Sprintf("%s/rest/v1/matches?matchzy_config->>matchid=eq.%s&select=id&limit=1", c.baseURL, numericMatchID)
-	return c.fetchSingleMatchID(url)
+	params := url.Values{}
+	params.Set("matchzy_config->>matchid", "eq."+numericMatchID)
+	params.Set("select", "id")
+	params.Set("limit", "1")
+	return c.fetchSingleMatchID(params)
 }
 
 // queryMatchByStatus busca partida com status específico (a mais recente)
 func (c *SupabaseClient) queryMatchByStatus(status string) (string, error) {
-	url := fmt.Sprintf("%s/rest/v1/matches?status=eq.%s&select=id&order=updated_at.desc&limit=1", c.baseURL, status)
-	return c.fetchSingleMatchID(url)
+	params := url.Values{}
+	params.Set("status", "eq."+status)
+	params.Set("select", "id")
+	params.Set("order", "updated_at.desc")
+	params.Set("limit", "1")
+	return c.fetchSingleMatchID(params)
 }
 
 // queryMatchByStatusWithConfig busca partida com status e que tem matchzy_config não-nulo
 func (c *SupabaseClient) queryMatchByStatusWithConfig(status string) (string, error) {
-	url := fmt.Sprintf("%s/rest/v1/matches?status=eq.%s&matchzy_config=not.is.null&select=id&order=updated_at.desc&limit=1", c.baseURL, status)
-	return c.fetchSingleMatchID(url)
+	params := url.Values{}
+	params.Set("status", "eq."+status)
+	params.Set("matchzy_config", "not.is.null")
+	params.Set("select", "id")
+	params.Set("order", "updated_at.desc")
+	params.Set("limit", "1")
+	return c.fetchSingleMatchID(params)
 }
 
 // fetchSingleMatchID executa uma query e retorna o ID da primeira partida
-func (c *SupabaseClient) fetchSingleMatchID(url string) (string, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func (c *SupabaseClient) fetchSingleMatchID(params url.Values) (string, error) {
+	reqURL := fmt.Sprintf("%s/rest/v1/matches?%s", c.baseURL, params.Encode())
+	log.Printf("[Supabase] Query: %s", reqURL)
+
+	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -610,20 +626,20 @@ func (c *SupabaseClient) fetchSingleMatchID(url string) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var matches []struct {
 		ID string `json:"id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&matches); err != nil {
-		return "", fmt.Errorf("failed to decode: %w", err)
+	if err := json.Unmarshal(body, &matches); err != nil {
+		return "", fmt.Errorf("failed to decode: %w (body: %s)", err, string(body))
 	}
 
 	if len(matches) == 0 {
-		return "", fmt.Errorf("no match found")
+		return "", fmt.Errorf("no match found (body: %s)", string(body))
 	}
 
 	log.Printf("[Supabase] Resolved matchID → UUID %s", matches[0].ID)
