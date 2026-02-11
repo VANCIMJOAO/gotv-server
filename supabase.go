@@ -544,15 +544,57 @@ func (c *SupabaseClient) InsertMatchRound(round map[string]interface{}) error {
 
 // ResolveMatchUUID resolve um matchID numérico (do MatchZy) para o UUID real do banco
 // Busca a partida que tem matchzy_config->matchid igual ao valor numérico
+// Se não encontrar pelo matchid exato, busca a partida live/scheduled mais recente
+// (o MatchZy pode incrementar o matchid entre reloads)
 func (c *SupabaseClient) ResolveMatchUUID(numericMatchID string) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("supabase client not initialized")
 	}
 
-	// Buscar partida pelo matchzy_config que contém o matchid numérico
-	// Supabase JSON filter: matchzy_config->matchid = numericMatchID
-	url := fmt.Sprintf("%s/rest/v1/matches?matchzy_config->>matchid=eq.%s&select=id&limit=1", c.baseURL, numericMatchID)
+	// Tentativa 1: Busca exata pelo matchid no matchzy_config
+	uuid, err := c.queryMatchByConfig(numericMatchID)
+	if err == nil {
+		return uuid, nil
+	}
+	log.Printf("[Supabase] Exact matchid lookup failed for %s: %v", numericMatchID, err)
 
+	// Tentativa 2: Buscar a partida com status live (normalmente só tem 1)
+	uuid, err = c.queryMatchByStatus("live")
+	if err == nil {
+		log.Printf("[Supabase] Fallback: resolved via live match status → UUID %s", uuid)
+		return uuid, nil
+	}
+
+	// Tentativa 3: Buscar a partida com status scheduled que tem matchzy_config
+	uuid, err = c.queryMatchByStatusWithConfig("scheduled")
+	if err == nil {
+		log.Printf("[Supabase] Fallback: resolved via scheduled match with config → UUID %s", uuid)
+		return uuid, nil
+	}
+
+	return "", fmt.Errorf("no match found for matchzy_id %s (tried exact, live, scheduled)", numericMatchID)
+}
+
+// queryMatchByConfig busca partida pelo matchid exato no matchzy_config
+func (c *SupabaseClient) queryMatchByConfig(numericMatchID string) (string, error) {
+	url := fmt.Sprintf("%s/rest/v1/matches?matchzy_config->>matchid=eq.%s&select=id&limit=1", c.baseURL, numericMatchID)
+	return c.fetchSingleMatchID(url)
+}
+
+// queryMatchByStatus busca partida com status específico (a mais recente)
+func (c *SupabaseClient) queryMatchByStatus(status string) (string, error) {
+	url := fmt.Sprintf("%s/rest/v1/matches?status=eq.%s&select=id&order=updated_at.desc&limit=1", c.baseURL, status)
+	return c.fetchSingleMatchID(url)
+}
+
+// queryMatchByStatusWithConfig busca partida com status e que tem matchzy_config não-nulo
+func (c *SupabaseClient) queryMatchByStatusWithConfig(status string) (string, error) {
+	url := fmt.Sprintf("%s/rest/v1/matches?status=eq.%s&matchzy_config=not.is.null&select=id&order=updated_at.desc&limit=1", c.baseURL, status)
+	return c.fetchSingleMatchID(url)
+}
+
+// fetchSingleMatchID executa uma query e retorna o ID da primeira partida
+func (c *SupabaseClient) fetchSingleMatchID(url string) (string, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err
@@ -564,7 +606,7 @@ func (c *SupabaseClient) ResolveMatchUUID(numericMatchID string) (string, error)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve match UUID: %w", err)
+		return "", fmt.Errorf("supabase request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -581,9 +623,9 @@ func (c *SupabaseClient) ResolveMatchUUID(numericMatchID string) (string, error)
 	}
 
 	if len(matches) == 0 {
-		return "", fmt.Errorf("no match found with matchzy_id %s", numericMatchID)
+		return "", fmt.Errorf("no match found")
 	}
 
-	log.Printf("[Supabase] Resolved numeric matchID %s → UUID %s", numericMatchID, matches[0].ID)
+	log.Printf("[Supabase] Resolved matchID → UUID %s", matches[0].ID)
 	return matches[0].ID, nil
 }
