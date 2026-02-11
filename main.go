@@ -206,6 +206,7 @@ func (s *GOTVServer) Start() {
 	http.HandleFunc("/api/match/", loggingMiddleware(s.handleGetMatch))
 	http.HandleFunc("/api/events/", loggingMiddleware(s.handleGetEvents))
 	http.HandleFunc("/api/teams/refresh", loggingMiddleware(s.handleRefreshTeams))
+	http.HandleFunc("/api/debug/resolve/", loggingMiddleware(s.handleDebugResolve))
 	http.HandleFunc("/api/setmap/", loggingMiddleware(s.handleSetMap))
 	http.HandleFunc("/ws", loggingMiddleware(s.handleWebSocket))
 
@@ -728,7 +729,7 @@ func (s *GOTVServer) handleListMatches(w http.ResponseWriter, r *http.Request) {
 		matches = []map[string]interface{}{}
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{"matches": matches})
+	json.NewEncoder(w).Encode(map[string]interface{}{"matches": matches, "version": "2026-02-11-v3"})
 }
 
 // handleGetMatch retorna o estado de uma partida específica
@@ -786,6 +787,28 @@ func (s *GOTVServer) handleGetMatch(w http.ResponseWriter, r *http.Request) {
 	defer match.Mu.RUnlock()
 
 	json.NewEncoder(w).Encode(match.State)
+}
+
+// handleDebugResolve debug endpoint para testar resolução de matchID
+func (s *GOTVServer) handleDebugResolve(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	matchID := strings.TrimPrefix(r.URL.Path, "/api/debug/resolve/")
+	result := map[string]interface{}{
+		"input":          matchID,
+		"supabaseClient": s.matchzyHandler != nil && s.matchzyHandler.supabase != nil,
+	}
+
+	if s.matchzyHandler != nil {
+		resolved := s.matchzyHandler.resolveMatchID(matchID)
+		result["resolved"] = resolved
+		result["changed"] = resolved != matchID
+	} else {
+		result["error"] = "no matchzy handler"
+	}
+
+	json.NewEncoder(w).Encode(result)
 }
 
 // handleGetEvents retorna os eventos de uma partida
