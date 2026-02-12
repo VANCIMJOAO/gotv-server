@@ -139,15 +139,17 @@ func (s *GOTVServer) Start() {
 		finishAPIURL = "https://orbital-store.vercel.app"
 	}
 
-	var persister *StatsPersister
-	var eventPersister *EventPersister
-	if s.supabaseClient != nil {
-		persister = NewStatsPersister(s.supabaseClient, s.teamRegistry, finishAPIURL)
-		eventPersister = NewEventPersister(s.supabaseClient, s.teamRegistry)
-		log.Printf("[Server] Stats persister configured - Finish API: %s", finishAPIURL)
+	// Forward URL para encaminhar eventos para Next.js webhook (persistencia)
+	forwardWebhookURL := os.Getenv("FORWARD_WEBHOOK_URL")
+	forwardWebhookSecret := os.Getenv("FORWARD_WEBHOOK_SECRET")
+
+	persister := NewStatsPersister(finishAPIURL)
+	log.Printf("[Server] Finish API configured: %s", finishAPIURL)
+	if forwardWebhookURL != "" {
+		log.Printf("[Server] Event forwarding enabled: %s", forwardWebhookURL)
 	}
 
-	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken, s.supabaseClient, persister, eventPersister)
+	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken, s.supabaseClient, persister, forwardWebhookURL, forwardWebhookSecret)
 	s.matchzyHandler.RegisterRoutes()
 
 	log.Printf("=================================")
@@ -399,16 +401,16 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetWriteDeadline(time.Now().Add(WSWriteTimeout))
 	client.WriteMessage(websocket.TextMessage, data)
 
-	// Enviar eventos históricos existentes para sincronizar o game log
+	// Enviar game events formatados para sincronizar kill feed, game log
 	if s.matchzyHandler != nil {
 		state := s.matchzyHandler.GetState(matchID)
 		if state != nil {
 			state.mu.RLock()
-			events := make([]MatchZyEvent, len(state.Events))
-			copy(events, state.Events)
+			gameEvents := make([]WSGameEvent, len(state.GameEvents))
+			copy(gameEvents, state.GameEvents)
 			state.mu.RUnlock()
 
-			for _, event := range events {
+			for _, event := range gameEvents {
 				eventMsg := WebSocketMessage{
 					Type:      "event",
 					MatchID:   matchID,
@@ -419,8 +421,8 @@ func (s *GOTVServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				conn.SetWriteDeadline(time.Now().Add(WSWriteTimeout))
 				client.WriteMessage(websocket.TextMessage, eventData)
 			}
-			if len(events) > 0 {
-				log.Printf("[WS] Sent %d existing events to new client", len(events))
+			if len(gameEvents) > 0 {
+				log.Printf("[WS] Sent %d game events to new client", len(gameEvents))
 			}
 		}
 	}
