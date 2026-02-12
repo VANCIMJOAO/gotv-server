@@ -143,7 +143,7 @@ func (s *GOTVServer) Start() {
 	forwardWebhookURL := os.Getenv("FORWARD_WEBHOOK_URL")
 	forwardWebhookSecret := os.Getenv("FORWARD_WEBHOOK_SECRET")
 
-	persister := NewStatsPersister(finishAPIURL)
+	persister := NewStatsPersister(finishAPIURL, forwardWebhookSecret)
 	log.Printf("[Server] Finish API configured: %s", finishAPIURL)
 	if forwardWebhookURL != "" {
 		log.Printf("[Server] Event forwarding enabled: %s", forwardWebhookURL)

@@ -14,12 +14,14 @@ import (
 // Toda a persistencia de stats/rounds/events agora e feita pelo Next.js webhook
 type StatsPersister struct {
 	finishAPIURL string
+	authSecret   string
 }
 
 // NewStatsPersister cria um novo persistidor
-func NewStatsPersister(finishAPIURL string) *StatsPersister {
+func NewStatsPersister(finishAPIURL, authSecret string) *StatsPersister {
 	return &StatsPersister{
 		finishAPIURL: finishAPIURL,
+		authSecret:   authSecret,
 	}
 }
 
@@ -47,6 +49,9 @@ func (sp *StatsPersister) CallFinishAPI(dbMatchID string, team1Score, team2Score
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if sp.authSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+sp.authSecret)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
