@@ -143,13 +143,19 @@ func (s *GOTVServer) Start() {
 	forwardWebhookURL := os.Getenv("FORWARD_WEBHOOK_URL")
 	forwardWebhookSecret := os.Getenv("FORWARD_WEBHOOK_SECRET")
 
-	persister := NewStatsPersister(finishAPIURL, forwardWebhookSecret)
+	persister := NewStatsPersister(s.supabaseClient, s.teamRegistry, finishAPIURL, forwardWebhookSecret)
 	log.Printf("[Server] Finish API configured: %s", finishAPIURL)
 	if forwardWebhookURL != "" {
 		log.Printf("[Server] Event forwarding enabled: %s", forwardWebhookURL)
 	}
 
-	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken, s.supabaseClient, persister, forwardWebhookURL, forwardWebhookSecret)
+	var eventPersister *EventPersister
+	if s.supabaseClient != nil {
+		eventPersister = NewEventPersister(s.supabaseClient)
+		log.Printf("[Server] Event persister configured (direct Supabase writes)")
+	}
+
+	s.matchzyHandler = NewMatchZyHandler(s, matchzyAuthToken, s.supabaseClient, persister, eventPersister, forwardWebhookURL, forwardWebhookSecret)
 	s.matchzyHandler.RegisterRoutes()
 
 	log.Printf("=================================")

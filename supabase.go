@@ -337,6 +337,299 @@ func (c *SupabaseClient) FetchMatchDetails(matchID string) (*MatchFromDB, error)
 	return &matches[0], nil
 }
 
+// UpdateMatchLive marca uma partida como ao vivo no Supabase
+func (c *SupabaseClient) UpdateMatchLive(matchID string) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	reqURL := fmt.Sprintf("%s/rest/v1/matches?id=eq.%s", c.baseURL, matchID)
+
+	payload := map[string]interface{}{
+		"status":      "live",
+		"match_phase": "live",
+		"is_live":     true,
+		"started_at":  time.Now().UTC().Format(time.RFC3339),
+	}
+
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest("PATCH", reqURL, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update match live: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	log.Printf("[Supabase] Match %s marked as LIVE", matchID)
+	return nil
+}
+
+// UpdateMatchScores atualiza os scores de uma partida em tempo real
+func (c *SupabaseClient) UpdateMatchScores(matchID string, team1Score, team2Score int) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	reqURL := fmt.Sprintf("%s/rest/v1/matches?id=eq.%s", c.baseURL, matchID)
+
+	payload := map[string]interface{}{
+		"team1_score": team1Score,
+		"team2_score": team2Score,
+	}
+
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest("PATCH", reqURL, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update match scores: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// CreateMatchMap cria um registro de match_map no Supabase (ou retorna o existente)
+func (c *SupabaseClient) CreateMatchMap(matchID string, mapName string, mapNumber int) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("supabase client not initialized")
+	}
+
+	// Verificar se ja existe
+	checkURL := fmt.Sprintf("%s/rest/v1/match_maps?match_id=eq.%s&map_number=eq.%d&select=id", c.baseURL, matchID, mapNumber)
+	req, err := http.NewRequest("GET", checkURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		var existing []struct {
+			ID string `json:"id"`
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		if json.Unmarshal(respBody, &existing) == nil && len(existing) > 0 {
+			log.Printf("[Supabase] match_map already exists: %s", existing[0].ID)
+			return existing[0].ID, nil
+		}
+	}
+
+	// Criar novo
+	createURL := fmt.Sprintf("%s/rest/v1/match_maps", c.baseURL)
+	payload := map[string]interface{}{
+		"match_id":   matchID,
+		"map_name":   mapName,
+		"map_number": mapNumber,
+		"status":     "live",
+	}
+
+	body, _ := json.Marshal(payload)
+	req, err = http.NewRequest("POST", createURL, strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=representation")
+
+	resp2, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to create match_map: %w", err)
+	}
+	defer resp2.Body.Close()
+
+	respBody, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusCreated && resp2.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("supabase returned status %d: %s", resp2.StatusCode, string(respBody))
+	}
+
+	var created []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &created); err != nil || len(created) == 0 {
+		return "", fmt.Errorf("failed to parse created match_map: %s", string(respBody))
+	}
+
+	log.Printf("[Supabase] Created match_map: %s (map: %s, number: %d)", created[0].ID, mapName, mapNumber)
+	return created[0].ID, nil
+}
+
+// UpdateMatchMap atualiza o registro match_map com scores e status
+func (c *SupabaseClient) UpdateMatchMap(matchID string, mapNumber int, team1Score, team2Score int, winnerID string, status string) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	reqURL := fmt.Sprintf("%s/rest/v1/match_maps?match_id=eq.%s&map_number=eq.%d", c.baseURL, matchID, mapNumber)
+
+	payload := map[string]interface{}{
+		"team1_score": team1Score,
+		"team2_score": team2Score,
+		"status":      status,
+	}
+	if winnerID != "" {
+		payload["winner_id"] = winnerID
+	}
+
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest("PATCH", reqURL, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to update match_map: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	log.Printf("[Supabase] Updated match_map: match=%s, map=%d, score=%d-%d, status=%s", matchID, mapNumber, team1Score, team2Score, status)
+	return nil
+}
+
+// GetMatchMapID retorna o ID do match_map para um dado match e map_number
+func (c *SupabaseClient) GetMatchMapID(matchID string, mapNumber int) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("supabase client not initialized")
+	}
+
+	reqURL := fmt.Sprintf("%s/rest/v1/match_maps?match_id=eq.%s&map_number=eq.%d&select=id", c.baseURL, matchID, mapNumber)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var results []struct {
+		ID string `json:"id"`
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	if json.Unmarshal(respBody, &results) == nil && len(results) > 0 {
+		return results[0].ID, nil
+	}
+	return "", fmt.Errorf("match_map not found")
+}
+
+// InsertMatchPlayerStats insere stats de jogadores no banco
+func (c *SupabaseClient) InsertMatchPlayerStats(stats []map[string]interface{}) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	reqURL := fmt.Sprintf("%s/rest/v1/match_player_stats", c.baseURL)
+
+	body, _ := json.Marshal(stats)
+	req, err := http.NewRequest("POST", reqURL, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to insert player stats: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	log.Printf("[Supabase] Inserted %d player stats records", len(stats))
+	return nil
+}
+
+// InsertMatchRound insere um registro de round no banco
+func (c *SupabaseClient) InsertMatchRound(round map[string]interface{}) error {
+	if c == nil {
+		return fmt.Errorf("supabase client not initialized")
+	}
+
+	reqURL := fmt.Sprintf("%s/rest/v1/match_rounds", c.baseURL)
+
+	body, _ := json.Marshal(round)
+	req, err := http.NewRequest("POST", reqURL, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to insert match round: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("supabase returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
 // ResolveMatchUUID resolve um matchID numerico (do MatchZy) para o UUID real do banco
 func (c *SupabaseClient) ResolveMatchUUID(numericMatchID string) (string, error) {
 	if c == nil {

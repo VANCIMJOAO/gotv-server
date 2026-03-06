@@ -309,10 +309,11 @@ type MatchZyState struct {
 	Events         []MatchZyEvent    `json:"events,omitempty"`
 	LastEvent      *MatchZyEvent     `json:"lastEvent,omitempty"`
 	GameEvents     []WSGameEvent     `json:"-"` // Eventos formatados para replay via WS
-	LastRoundEnd   *MatchZyRoundEnd  `json:"-"`
-	LastMapResult  *MatchZyMapResult `json:"-"`
-	UpdatedAt      time.Time         `json:"updatedAt"`
-	mu             sync.RWMutex
+	LastRoundEnd      *MatchZyRoundEnd  `json:"-"`
+	LastMapResult     *MatchZyMapResult `json:"-"`
+	CurrentMatchMapID string            `json:"-"` // ID do match_map no Supabase
+	UpdatedAt         time.Time         `json:"updatedAt"`
+	mu                sync.RWMutex
 }
 
 // NewMatchZyState cria um novo estado de partida
@@ -391,29 +392,31 @@ func (s *MatchZyState) GetTeamBySide(side string) *MatchTeamInfo {
 
 // MatchZyHandler gerencia eventos do MatchZy
 type MatchZyHandler struct {
-	states        map[string]*MatchZyState
-	statesMu      sync.RWMutex
-	gotvServer    *GOTVServer
-	authToken     string
-	supabase      *SupabaseClient
-	persister     *StatsPersister // Apenas para CallFinishAPI (safety net)
-	forwardURL    string
-	forwardSecret string
-	uuidCache     map[string]string
-	uuidMu        sync.RWMutex
+	states         map[string]*MatchZyState
+	statesMu       sync.RWMutex
+	gotvServer     *GOTVServer
+	authToken      string
+	supabase       *SupabaseClient
+	persister      *StatsPersister
+	eventPersister *EventPersister
+	forwardURL     string
+	forwardSecret  string
+	uuidCache      map[string]string
+	uuidMu         sync.RWMutex
 }
 
 // NewMatchZyHandler cria um novo handler de eventos MatchZy
-func NewMatchZyHandler(gotvServer *GOTVServer, authToken string, supabase *SupabaseClient, persister *StatsPersister, forwardURL, forwardSecret string) *MatchZyHandler {
+func NewMatchZyHandler(gotvServer *GOTVServer, authToken string, supabase *SupabaseClient, persister *StatsPersister, eventPersister *EventPersister, forwardURL, forwardSecret string) *MatchZyHandler {
 	return &MatchZyHandler{
-		states:        make(map[string]*MatchZyState),
-		gotvServer:    gotvServer,
-		authToken:     authToken,
-		supabase:      supabase,
-		persister:     persister,
-		forwardURL:    forwardURL,
-		forwardSecret: forwardSecret,
-		uuidCache:     make(map[string]string),
+		states:         make(map[string]*MatchZyState),
+		gotvServer:     gotvServer,
+		authToken:      authToken,
+		supabase:       supabase,
+		persister:      persister,
+		eventPersister: eventPersister,
+		forwardURL:     forwardURL,
+		forwardSecret:  forwardSecret,
+		uuidCache:      make(map[string]string),
 	}
 }
 
@@ -776,7 +779,34 @@ func (h *MatchZyHandler) handleGoingLive(state *MatchZyState, body []byte) {
 		go h.populateTeamsFromDB(state)
 	}
 
-	// NOTA: UpdateMatchLive removido - Next.js webhook cuida da persistencia via forwarding
+	// Persistir diretamente no Supabase (safety net caso forwarding falhe)
+	if h.supabase != nil {
+		go func() {
+			if err := h.supabase.UpdateMatchLive(state.MatchID); err != nil {
+				log.Printf("[MatchZy] Failed to update match live in DB: %v", err)
+			}
+
+			// Criar match_map para este mapa
+			state.mu.RLock()
+			mapName := state.MapName
+			mapNumber := state.CurrentMap
+			state.mu.RUnlock()
+
+			if mapName == "" {
+				mapName = "unknown"
+			}
+
+			matchMapID, err := h.supabase.CreateMatchMap(state.MatchID, mapName, mapNumber)
+			if err != nil {
+				log.Printf("[MatchZy] Failed to create match_map: %v", err)
+			} else {
+				state.mu.Lock()
+				state.CurrentMatchMapID = matchMapID
+				state.mu.Unlock()
+				log.Printf("[MatchZy] match_map created/found: %s", matchMapID)
+			}
+		}()
+	}
 }
 
 // populateTeamsFromDB busca os dados dos times no Supabase e popula o state
@@ -973,7 +1003,18 @@ func (h *MatchZyHandler) handleRoundEnd(state *MatchZyState, body []byte) {
 	h.broadcastGameEvent(state, roundEndEvent)
 	state.AddGameEvent(roundEndEvent)
 
-	// NOTA: Persistencia removida - Next.js webhook cuida via forwarding
+	// Persistir scores e round diretamente no Supabase (safety net)
+	if h.supabase != nil {
+		go func() {
+			if err := h.supabase.UpdateMatchScores(state.MatchID, event.Team1.Score, event.Team2.Score); err != nil {
+				log.Printf("[MatchZy] Failed to update scores in DB: %v", err)
+			}
+		}()
+	}
+
+	if h.eventPersister != nil {
+		go h.persistRoundData(state, &event)
+	}
 }
 
 // matchzyRoundReason mapeia o codigo de razao para string legivel
@@ -984,9 +1025,9 @@ func matchzyRoundReason(reason int) string {
 	case 7:
 		return "bomb_defused"
 	case 8:
-		return "ct_elimination"
+		return "cts_killed"
 	case 9:
-		return "t_elimination"
+		return "terrorists_killed"
 	case 12:
 		return "time_expired"
 	case 17:
@@ -994,6 +1035,50 @@ func matchzyRoundReason(reason int) string {
 	default:
 		return fmt.Sprintf("reason_%d", reason)
 	}
+}
+
+// persistRoundData persiste os dados de um round no Supabase
+func (h *MatchZyHandler) persistRoundData(state *MatchZyState, event *MatchZyRoundEnd) {
+	state.mu.RLock()
+	var winnerTeamID, ctTeamID, tTeamID string
+
+	if state.Team1 != nil && state.Team2 != nil {
+		if event.Winner.Team == "team1" {
+			winnerTeamID = state.Team1.ID
+			if strings.EqualFold(event.Winner.Side, "ct") {
+				ctTeamID = state.Team1.ID
+				tTeamID = state.Team2.ID
+			} else {
+				ctTeamID = state.Team2.ID
+				tTeamID = state.Team1.ID
+			}
+		} else if event.Winner.Team == "team2" {
+			winnerTeamID = state.Team2.ID
+			if strings.EqualFold(event.Winner.Side, "ct") {
+				ctTeamID = state.Team2.ID
+				tTeamID = state.Team1.ID
+			} else {
+				ctTeamID = state.Team1.ID
+				tTeamID = state.Team2.ID
+			}
+		}
+	}
+	matchMapID := state.CurrentMatchMapID
+	state.mu.RUnlock()
+
+	roundData := RoundPersistData{
+		MatchMapID:      matchMapID,
+		RoundNumber:     event.RoundNumber,
+		WinnerTeamID:    winnerTeamID,
+		WinReason:       matchzyRoundReason(event.Reason),
+		CTTeamID:        ctTeamID,
+		TTeamID:         tTeamID,
+		CTScore:         event.Team1.Score,
+		TScore:          event.Team2.Score,
+		DurationSeconds: event.RoundTime / 1000,
+	}
+
+	h.eventPersister.PersistRound(state.MatchID, roundData)
 }
 
 // handleMapResult processa fim de mapa
@@ -1023,11 +1108,34 @@ func (h *MatchZyHandler) handleMapResult(state *MatchZyState, body []byte) {
 		state.MatchID, event.MapNumber, event.Winner.Team, event.Winner.Side,
 		event.Team1.Score, event.Team2.Score)
 
-	// Se for BO1, a partida terminou - chamar finish API como safety net
+	// Atualizar match_maps no Supabase
+	if h.supabase != nil {
+		go func() {
+			var winnerID string
+			state.mu.RLock()
+			if event.Winner.Team == "team1" && state.Team1 != nil {
+				winnerID = state.Team1.ID
+			} else if event.Winner.Team == "team2" && state.Team2 != nil {
+				winnerID = state.Team2.ID
+			}
+			state.mu.RUnlock()
+
+			if err := h.supabase.UpdateMatchMap(state.MatchID, event.MapNumber, event.Team1.Score, event.Team2.Score, winnerID, "finished"); err != nil {
+				log.Printf("[MatchZy] Failed to update match_map: %v", err)
+			}
+		}()
+	}
+
+	// Se for BO1, a partida terminou
 	if state.BestOf <= 1 {
 		state.UpdatePhase(PhaseFinished)
+
+		// Persistir stats e chamar finish API
 		if h.persister != nil {
 			go func() {
+				if err := h.persister.PersistMatchStatsFromMatchZy(state.MatchID, state, &event); err != nil {
+					log.Printf("[MatchZy] Failed to persist match stats: %v", err)
+				}
 				if err := h.persister.CallFinishAPI(state.MatchID, event.Team1.Score, event.Team2.Score); err != nil {
 					log.Printf("[MatchZy] Failed to call finish API: %v", err)
 				}
@@ -1050,12 +1158,13 @@ func (h *MatchZyHandler) handleSeriesEnd(state *MatchZyState, body []byte) {
 		state.MatchID, event.Winner.Team, event.Winner.Side,
 		event.Team1SeriesScore, event.Team2SeriesScore)
 
-	// Chamar finish API como safety net (Next.js webhook faz a persistencia principal)
+	// Persistir stats do ultimo mapa e chamar finish API
 	if h.persister != nil {
 		go func() {
+			state.mu.RLock()
+			lastMap := state.LastMapResult
 			team1Score := 0
 			team2Score := 0
-			state.mu.RLock()
 			if state.Team1 != nil {
 				team1Score = state.Team1.Score
 			}
@@ -1063,6 +1172,12 @@ func (h *MatchZyHandler) handleSeriesEnd(state *MatchZyState, body []byte) {
 				team2Score = state.Team2.Score
 			}
 			state.mu.RUnlock()
+
+			if lastMap != nil {
+				if err := h.persister.PersistMatchStatsFromMatchZy(state.MatchID, state, lastMap); err != nil {
+					log.Printf("[MatchZy] Failed to persist match stats: %v", err)
+				}
+			}
 			if err := h.persister.CallFinishAPI(state.MatchID, team1Score, team2Score); err != nil {
 				log.Printf("[MatchZy] Failed to call finish API: %v", err)
 			}
